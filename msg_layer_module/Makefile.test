@@ -1,0 +1,12 @@
+# Test module Makefile
+obj-m += test_cxl.o
+
+KDIR := /lib/modules/$(shell uname -r)/build
+
+test:
+	make -C $(KDIR) M=$(PWD) modules
+
+test_clean:
+	make -C $(KDIR) M=$(PWD) clean
+
+.PHONY: test test_clean

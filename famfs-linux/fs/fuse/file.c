@@ -2644,21 +2644,36 @@ static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	int rc;
 
+	pr_info("[%s]: inode %lu, file %p, vma %p\n",
+		 __func__, inode->i_ino, file, vma);
+
 	/* DAX mmap is superior to direct_io mmap */
-	if (FUSE_IS_VIRTIO_DAX(fi))
+	if (FUSE_IS_VIRTIO_DAX(fi)) {
+		pr_info("[%s]: virtio-dax inode %lu, file %p, vma %p\n",
+			 __func__, inode->i_ino, file, vma);
 		return fuse_dax_mmap(file, vma);
-	if (fuse_file_famfs(fi))
+	}
+	if (fuse_file_famfs(fi)) {
+		pr_info("[%s]: famfs inode %lu, file %p, vma %p\n",
+			 __func__, inode->i_ino, file, vma);
 		return famfs_fuse_mmap(file, vma);
+	}
 
 	/*
 	 * If inode is in passthrough io mode, because it has some file open
 	 * in passthrough mode, either mmap to backing file or fail mmap,
 	 * because mixing cached mmap and passthrough io mode is not allowed.
 	 */
-	if (fuse_file_passthrough(ff))
+	if (fuse_file_passthrough(ff)) {
+		pr_info("[%s]: passthrough inode %lu, file %p, vma %p\n",
+			 __func__, inode->i_ino, file, vma);
 		return fuse_passthrough_mmap(file, vma);
-	else if (fuse_inode_backing(get_fuse_inode(inode)))
+	}
+	else if (fuse_inode_backing(get_fuse_inode(inode))) {
+		pr_info("[%s]: backing inode %lu, file %p, vma %p\n",
+			 __func__, inode->i_ino, file, vma);
 		return -ENODEV;
+	}
 
 	/*
 	 * FOPEN_DIRECT_IO handling is special compared to O_DIRECT,

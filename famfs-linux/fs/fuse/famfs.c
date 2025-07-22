@@ -921,6 +921,8 @@ static vm_fault_t
 __famfs_fuse_filemap_fault(struct vm_fault *vmf, unsigned int pe_size,
 		      bool write_fault)
 {
+	pr_info("[famfs_fuse_filemap_fault] vma=%p, file=%p, pgoff=%lx\n",
+		vmf->vma, vmf->vma->vm_file, vmf->pgoff);
 	struct inode *inode = file_inode(vmf->vma->vm_file);
 	vm_fault_t ret;
 	pfn_t pfn;
@@ -931,12 +933,24 @@ __famfs_fuse_filemap_fault(struct vm_fault *vmf, unsigned int pe_size,
 	}
 
 	if (write_fault) {
+		pr_info("[famfs_fuse_filemap_fault] write fault, sb_start_pagefault\n");
+		/* If this is a write fault, we need to start the pagefault
+		 * before we call dax_iomap_fault() so that the pagefault
+		 * handler can handle the fault correctly.
+		 */
 		sb_start_pagefault(inode->i_sb);
 		file_update_time(vmf->vma->vm_file);
 	}
-
+	// print before dax_iomap_fault() and arguments to it
+	pr_info("[famfs_fuse_filemap_fault] calling dax_iomap_fault() "
+		"pe_size=%u, write_fault=%d\n", pe_size, write_fault);
+	pr_info("vmf->vma->vm_file=%p, vmf->pgoff=%lx\n",
+		vmf->vma->vm_file, vmf->pgoff);
 	ret = dax_iomap_fault(vmf, pe_size, &pfn, NULL, &famfs_iomap_ops);
+	// print after dax_iomap_fault() and return value
+	pr_info("[famfs_fuse_filemap_fault] returned from dax_iomap_fault()");
 	if (ret & VM_FAULT_NEEDDSYNC)
+		pr_info("[famfs_fuse_filemap_fault] VM_FAULT_NEEDDSYNC set\n");
 		ret = dax_finish_sync_fault(vmf, pe_size, pfn);
 
 	if (write_fault)
@@ -955,12 +969,16 @@ famfs_is_write_fault(struct vm_fault *vmf)
 static vm_fault_t
 famfs_filemap_fault(struct vm_fault *vmf)
 {
+	pr_info("[famfs_filemap_fault] vma=%p, file=%p, pgoff=%lx\n",
+		vmf->vma, vmf->vma->vm_file, vmf->pgoff);
 	return __famfs_fuse_filemap_fault(vmf, 0, famfs_is_write_fault(vmf));
 }
 
 static vm_fault_t
 famfs_filemap_huge_fault(struct vm_fault *vmf, unsigned int pe_size)
 {
+	pr_info("[famfs_filemap_huge_fault] vma=%p, file=%p, pgoff=%lx\n",
+		vmf->vma, vmf->vma->vm_file, vmf->pgoff);
 	return __famfs_fuse_filemap_fault(vmf, pe_size, famfs_is_write_fault(vmf));
 }
 

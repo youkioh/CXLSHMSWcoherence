@@ -103,6 +103,8 @@ void cxl_kmsg_put(struct cxl_kmsg_message *msg);
 int cxl_kmsg_send_message(int dest_nid, struct cxl_kmsg_message *msg, size_t size);
 int cxl_kmsg_broadcast_message(struct cxl_kmsg_message *msg, size_t size);
 int cxl_kmsg_poll_all_rx(struct cxl_kmsg_message **msg, int *from_nid);
+int cxl_kmsg_register_processor(void (*processor)(struct cxl_kmsg_message *msg));
+void cxl_kmsg_unregister_processor(void);
 
 /* Cache management */
 static inline void __flush_processor_cache(const void *addr, size_t len);
@@ -320,17 +322,62 @@ static inline int cxl_kmsg_window_init(struct cxl_kmsg_window *window)
  * MESSAGE HANDLING
  * ============================================================================= */
 
+/* External message processor function pointer */
+static void (*external_msg_processor)(struct cxl_kmsg_message *msg) = NULL;
+static DEFINE_SPINLOCK(processor_lock);
+
+/**
+ * cxl_kmsg_register_processor() - Register external message processor
+ */
+int cxl_kmsg_register_processor(void (*processor)(struct cxl_kmsg_message *msg))
+{
+    unsigned long flags;
+    
+    spin_lock_irqsave(&processor_lock, flags);
+    external_msg_processor = processor;
+    spin_unlock_irqrestore(&processor_lock, flags);
+    
+    printk(KERN_INFO "%s: External message processor registered\n", MODULE_NAME);
+    return 0;
+}
+EXPORT_SYMBOL(cxl_kmsg_register_processor);
+
+/**
+ * cxl_kmsg_unregister_processor() - Unregister external message processor
+ */
+void cxl_kmsg_unregister_processor(void)
+{
+    unsigned long flags;
+    
+    spin_lock_irqsave(&processor_lock, flags);
+    external_msg_processor = NULL;
+    spin_unlock_irqrestore(&processor_lock, flags);
+    
+    printk(KERN_INFO "%s: External message processor unregistered\n", MODULE_NAME);
+}
+EXPORT_SYMBOL(cxl_kmsg_unregister_processor);
+
 /**
  * cxl_kmsg_process() - Process received message
  */
 static void cxl_kmsg_process(struct cxl_kmsg_message *msg)
 {
-    printk(KERN_INFO "%s: Processing message type=%d, size=%d, from_nid=%d\n",
-           MODULE_NAME, msg->header.type, msg->header.size, msg->header.from_nid);
+    unsigned long flags;
+    void (*processor)(struct cxl_kmsg_message *msg);
     
-    /* Add your message processing logic here */
+    spin_lock_irqsave(&processor_lock, flags);
+    processor = external_msg_processor;
+    spin_unlock_irqrestore(&processor_lock, flags);
     
-    kfree(msg);
+    if (processor) {
+        processor(msg);
+    } else {
+        /* Default processing if no external processor registered */
+        printk(KERN_INFO "%s: Processing message type=%d, size=%d, from_nid=%d\n",
+               MODULE_NAME, msg->header.type, msg->header.size, msg->header.from_nid);
+        printk(KERN_INFO "%s: Message payload: %.*s\n", MODULE_NAME, msg->header.size, msg->payload);
+        kfree(msg);
+    }
 }
 
 /**
@@ -573,13 +620,14 @@ int cxl_kmsg_poll_all_rx(struct cxl_kmsg_message **msg, int *from_nid)
             rcv_msg->ready = 0;
             cxl_flush_cache_range(&rcv_msg->ready, sizeof(rcv_msg->ready));
             
-            return 0; /* Message received */
+            return 0; /* Success */
         }
     }
     
     return -EAGAIN; /* No messages available */
 }
 EXPORT_SYMBOL(cxl_kmsg_poll_all_rx);
+
 
 /* =============================================================================
  * UTILITY FUNCTIONS

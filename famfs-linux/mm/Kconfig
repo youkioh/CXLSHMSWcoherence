@@ -1358,6 +1358,18 @@ config PT_RECLAIM
 
 	  Note: now only empty user PTE page table pages will be reclaimed.
 
+config PAGE_COHERENCE
+	bool "Page Coherence Management for CXL Shared Memory"
+	depends on MMU
+	help
+	  This enables page coherence management functionality for CXL shared
+	  memory environments. When enabled, the system can create replica pages
+	  and manage coherence between original and replica pages.
+
+	  This feature is useful for CXL shared memory scenarios where multiple
+	  nodes need to maintain coherent views of shared pages.
+
+	  If you are unsure, say N.
 
 source "mm/damon/Kconfig"
 

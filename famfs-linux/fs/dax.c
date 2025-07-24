@@ -25,6 +25,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/iomap.h>
 #include <linux/rmap.h>
+#include <linux/page_coherence.h>
 #include <asm/pgalloc.h>
 
 #define CREATE_TRACE_POINTS
@@ -1657,6 +1658,8 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		const struct iomap_iter *iter, pfn_t *pfnp,
 		struct xa_state *xas, void **entry, bool pmd)
 {
+	// Sungsu: print when function is called
+	pr_info("[dax_fault_iter] dax_fault_iter is called, pmd: %d\n", pmd);
 	const struct iomap *iomap = &iter->iomap;
 	const struct iomap *srcmap = iomap_iter_srcmap(iter);
 	size_t size = pmd ? PMD_SIZE : PAGE_SIZE;
@@ -1664,11 +1667,9 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	bool write = iter->flags & IOMAP_WRITE;
 	unsigned long entry_flags = pmd ? DAX_PMD : 0;
 	int err = 0;
+	int ret = 0;
 	pfn_t pfn;
 	void *kaddr;
-	// print dax_fault_iter is started
-	pr_info("[dax_fault_iter] dax_fault_iter starte. vmf: %p, iter: %p, pfnp: %p, xas: %p, entry: %p, pmd: %d",
-		vmf, iter, pfnp, xas, *entry, pmd);
 
 	if (!pmd && vmf->cow_page)
 		return dax_fault_cow_page(vmf, iter);
@@ -1690,6 +1691,19 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	if (err)
 		return pmd ? VM_FAULT_FALLBACK : dax_fault_return(err);
 
+#ifdef CONFIG_PAGE_COHERENCE
+	// entry point to the page coherence management code
+	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn);
+	if (ret)
+		return dax_fault_return(ret);
+	pr_info("[dax_fault_iter] page_coherence injected mapping for pfn %lu at addr 0x%lx\n",
+		pfn_t_to_pfn(pfn), vmf->address);
+
+    // /* Mapping done in page_coherence_fault, skip dax_insert and vmf_insert */
+	// return VM_FAULT_NOPAGE;
+#endif // CONFIG_PAGE_COHERENCE
+	
+    /* Normal DAX fs insertion path */
 	*entry = dax_insert_entry(xas, vmf, iter, *entry, pfn, entry_flags);
 
 	if (write && iomap->flags & IOMAP_F_SHARED) {
@@ -1703,29 +1717,28 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 
 	/* insert PMD pfn */
 	if (pmd) {
-		// print dax_fault_iter() and its arguments
-		pr_info("[dax_fault_iter] PMD. pmd: %d, vmf: %p, iter: %p, pfnp: %p, pfn: %lx, xas: %p, entry: %p",
-				pmd, vmf, iter, pfnp, pfn_t_to_pfn(pfn), xas, *entry);
+		// sungsu: vmf_insert_pfn_pmd is called
+		pr_info("[dax_fault_iter] Call vmf_insert_pfn_pmd() for PMD pfn insertion.\n");
 		return vmf_insert_pfn_pmd(vmf, pfn, write);
 	}
 
 	/* insert PTE pfn */
 	if (write) {
-		// print dax_fault_iter() and its arguments
-		pr_info("[dax_fault_iter] PTE write. vmf: %p, iter: %p, pfnp: %p, pfn: %lx, xas: %p, entry: %p",
-				vmf, iter, pfnp, pfn_t_to_pfn(pfn), xas, *entry);
+		// sungsu: vmf_insert_mixed_mkwrite is called
+		pr_info("[dax_fault_iter] Call vmf_insert_mixed_mkwrite() for PTE pfn insertion.\n");
 		return vmf_insert_mixed_mkwrite(vmf->vma, vmf->address, pfn);
 	}
 	// insert PTE pfn
-	// print dax_fault_iter() and its arguments
-	pr_info("[dax_fault_iter] PTE read. vmf: %p, iter: %p, pfnp: %p, pfn: %lx, xas: %p, entry: %p",
-			vmf, iter, pfnp, pfn_t_to_pfn(pfn), xas, *entry);
+	// sungsu: vmf_insert_mixed is called
+	pr_info("[dax_fault_iter] Call vmf_insert_mixed() for PTE pfn insertion.\n");
 	return vmf_insert_mixed(vmf->vma, vmf->address, pfn);
 }
 
 static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       int *iomap_errp, const struct iomap_ops *ops)
 {
+	// Sungsu: print when function is called
+	pr_info("[dax_iomap_pte_fault] dax_iomap_pte_fault called.\n");
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE(xas, &mapping->i_pages, vmf->pgoff);
 	struct iomap_iter iter = {
@@ -1776,10 +1789,6 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			iter.processed = -EIO;	/* fs corruption? */
 			continue;
 		}
-		// print dax_fault_iter() and its arguments and pte_entries
-		pr_info("[dax_iomap_pte_fault] iter: %p, vmf: %p, pfnp: %p, xas: %p, entry: %p, pte_entries: %d",
-			&iter, vmf, pfnp, &xas, entry, pte_entries);
-
 		ret = dax_fault_iter(vmf, &iter, pfnp, &xas, &entry, false);
 		if (ret != VM_FAULT_SIGBUS &&
 		    (iter.iomap.flags & IOMAP_F_NEW)) {
@@ -1841,6 +1850,8 @@ static bool dax_fault_check_fallback(struct vm_fault *vmf, struct xa_state *xas,
 static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       const struct iomap_ops *ops)
 {
+	// Sungsu: print when function is called
+	pr_info("[dax_iomap_pmd_fault] dax_iomap_pmd_fault called.\n");
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE_ORDER(xas, &mapping->i_pages, vmf->pgoff, PMD_ORDER);
 	struct iomap_iter iter = {
@@ -1900,12 +1911,10 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, pfn_t *pfnp,
 	// counter value for the number of PMD entries
 	int pmd_entries = 0;
 	while (iomap_iter(&iter, ops) > 0) {
+		pr_info("[dax_iomap_pmd_fault] pdm_entries: %d\n", pmd_entries);
 		pmd_entries++;
 		if (iomap_length(&iter) < PMD_SIZE)
 			continue; /* actually breaks out of the loop */
-		// print dax_fault_iter() and its arguments and pmd_entries
-		pr_info("[dax_iomap_pmd_fault] iter: %p, vmf: %p, pfnp: %p, xas: %p, entry: %p, pmd_entries: %d\n",
-			&iter, vmf, pfnp, &xas, entry, pmd_entries);
 		ret = dax_fault_iter(vmf, &iter, pfnp, &xas, &entry, true);
 		if (ret != VM_FAULT_FALLBACK)
 			iter.processed = PMD_SIZE;
@@ -1946,17 +1955,12 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, pfn_t *pfnp,
 vm_fault_t dax_iomap_fault(struct vm_fault *vmf, unsigned int order,
 		    pfn_t *pfnp, int *iomap_errp, const struct iomap_ops *ops)
 {
-	pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u, vmf: %p, pfnp: %p, iomap_errp: %p, ops: %p\n",
-		order, vmf, pfnp, iomap_errp, ops);
+	// Sungsu: print when function is called
+	pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u\n", order);
 	if (order == 0) {
-		// print dax_iomap_pte_fault() and it's arguments
-		pr_info("[dax_iomap_fault] order 0, vmf: %p, pfnp: %p, iomap_errp: %p, ops: %p\n",
-			vmf, pfnp, iomap_errp, ops);
 		return dax_iomap_pte_fault(vmf, pfnp, iomap_errp, ops);
 	}
 	else if (order == PMD_ORDER) {
-		// print dax_iomap_pmd_fault() and it's arguments
-		pr_info("[dax_iomap_fault] PMD order, vmf: %p, pfnp: %p, ops: %p\n", vmf, pfnp, ops);
 		return dax_iomap_pmd_fault(vmf, pfnp, ops);
 	}
 	else

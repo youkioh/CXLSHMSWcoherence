@@ -147,3 +147,6 @@ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
 obj-$(CONFIG_EXECMEM) += execmem.o
 obj-$(CONFIG_TMPFS_QUOTA) += shmem_quota.o
 obj-$(CONFIG_PT_RECLAIM) += pt_reclaim.o
+
+# for page coherence
+obj-$(CONFIG_PAGE_COHERENCE) += page_coherence.o page_replication_info.o

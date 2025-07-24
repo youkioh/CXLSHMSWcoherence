@@ -1,0 +1,232 @@
+/*
+ * Page Coherence Management for CXL Shared Memory
+ *
+ * This file implements page coherence functionality for managing 
+ * replica pages in CXL shared memory environments.
+ */
+
+#include <linux/mm.h>
+#include <linux/pgtable.h>
+#include <linux/slab.h>
+#include <linux/pfn_t.h>
+#include <linux/page_coherence.h>
+#include <linux/highmem.h>
+#include <linux/vmalloc.h>
+#include <linux/iomap.h>
+#include <linux/gfp.h>
+#include <linux/printk.h>
+#include <linux/memcontrol.h>
+#include <linux/huge_mm.h>    /* HPAGE_PMD_ORDER, HPAGE_PMD_SIZE */
+
+#ifdef CONFIG_PAGE_COHERENCE
+
+/**
+ * allocate_replica_pages - Allocate multiple pages for large replica
+ * @nr_pages: Number of pages to allocate
+ * @pages: Array to store allocated pages
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+static int allocate_replica_pages(unsigned int nr_pages, struct page **pages)
+{
+    unsigned int i;
+    gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE;
+
+    for (i = 0; i < nr_pages; i++) {
+        pages[i] = alloc_page(gfp_flags);
+        if (!pages[i]) {
+            pr_err("[page_coherence] Failed to allocate page %u of %u\n", i, nr_pages);
+            /* Free already allocated pages */
+            while (i > 0) {
+                i--;
+                __free_page(pages[i]);
+            }
+            return -ENOMEM;
+        }
+    }
+
+    pr_info("[page_coherence] Allocated %u replica pages\n", nr_pages);
+    return 0;
+}
+
+/**
+ * allocate_replica_page - Allocate a new page or compound page for replica
+ * @order: Page order (0 for single page, only for compatibility)
+ *
+ * Returns: Allocated page pointer on success, NULL on failure
+ */
+static struct page *allocate_replica_page(unsigned int order)
+{
+    struct page *page;
+    gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE;
+
+    /* Only support single page allocation now */
+    if (order > 0) {
+        pr_warn("[page_coherence] Large order allocation (%u) not supported, using single page\n", order);
+        order = 0;
+    }
+
+    page = alloc_page(gfp_flags);
+    if (!page) {
+        pr_err("[page_coherence] Failed to allocate replica page (order=%u)\n", order);
+        return NULL;
+    }
+
+    pr_info("[page_coherence] Allocated replica page (order=%u, pfn=%lu)\n",
+            order, page_to_pfn(page));
+    return page;
+}
+
+/**
+ * copy_page_data - Copy data from source to destination page
+ * @dst_page: Destination page
+ * @src_kaddr: Source kernel virtual address
+ * @size: Size to copy (PAGE_SIZE or PMD_SIZE)
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+static int copy_page_data(struct page *dst_page, void *src_kaddr, size_t size)
+{
+    void *dst_kaddr;
+    unsigned int nr_pages = size >> PAGE_SHIFT;
+    unsigned int i;
+
+    if (!dst_page || !src_kaddr) {
+        pr_err("[page_coherence] Invalid parameters for page copy\n");
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Copying %zu bytes (%u pages) from %p to pfn=%lu\n",
+            size, nr_pages, src_kaddr, page_to_pfn(dst_page));
+
+    if (nr_pages == 1) {
+        dst_kaddr = kmap_local_page(dst_page);
+        if (!dst_kaddr) {
+            pr_err("[page_coherence] Failed to map destination page\n");
+            return -ENOMEM;
+        }
+        memcpy(dst_kaddr, src_kaddr, PAGE_SIZE);
+        kunmap_local(dst_kaddr);
+    } else {
+        for (i = 0; i < nr_pages; i++) {
+            struct page *subpage = nth_page(dst_page, i);
+            void *src_offset = src_kaddr + (i * PAGE_SIZE);
+
+            dst_kaddr = kmap_local_page(subpage);
+            if (!dst_kaddr) {
+                pr_err("[page_coherence] Failed to map subpage %u\n", i);
+                return -ENOMEM;
+            }
+            memcpy(dst_kaddr, src_offset, PAGE_SIZE);
+            kunmap_local(dst_kaddr);
+        }
+    }
+
+    pr_info("[page_coherence] Successfully copied page data\n");
+    return 0;
+}
+
+/**
+ * page_coherence_fault - Handle page coherence faults
+ * @vmf: Fault information structure
+ * @iter: IOMAP iterator
+ * @size: Size of the fault (PAGE_SIZE or PMD_SIZE)
+ * @kaddr: Kernel virtual address of the original page
+ * @pfn: Pointer to the page frame number, will be updated to replica PFN
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
+                         size_t size, void *kaddr, pfn_t *pfn)
+{
+    struct page *replica_page;
+    unsigned int order;
+    pfn_t original_pfn = *pfn;
+    pfn_t replica_pfn;
+    int ret;
+
+    if (!vmf || !iter || !kaddr || !pfn) {
+        pr_err("[page_coherence] Invalid parameters\n");
+        return -EINVAL;
+    }
+
+    /* Determine page order - be conservative with huge page allocation */
+    if (size == PMD_SIZE) {
+        /* For 2MB pages, try regular page allocation first to avoid memory pressure */
+        pr_info("[page_coherence] PMD size detected (%zu bytes), using regular pages for replica\n", size);
+        order = 0;  /* Use regular 4KB pages instead of huge pages */
+    } else if (size == PAGE_SIZE) {
+        order = 0;
+    } else {
+        pr_err("[page_coherence] Unsupported size: %zu\n", size);
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Fault at 0x%lx: size=%zu order=%u original pfn=%lu\n",
+            vmf->address, size, order, pfn_t_to_pfn(original_pfn));
+
+    /* Allocate a replica page or compound page */
+    replica_page = allocate_replica_page(order);
+    if (!replica_page)
+        return -ENOMEM;
+
+    /* Copy data from original address to replica */
+    ret = copy_page_data(replica_page, kaddr, size);
+    if (ret) {
+        pr_err("[page_coherence] Data copy failed: %d\n", ret);
+        if (order > 0)
+            __free_pages(replica_page, order);
+        else
+            __free_page(replica_page);
+        return ret;
+    }
+
+    /* Build new PFN with preserved flags and update */
+    replica_pfn.val = page_to_pfn(replica_page) |
+                      (original_pfn.val & PFN_FLAGS_MASK);
+    *pfn = replica_pfn;
+
+    /* Install mapping into MMU */
+    {
+        unsigned long addr = vmf->address & PAGE_MASK;
+        struct mm_struct *mm = vmf->vma->vm_mm;
+
+        if (order == 0) {
+            /* 4KB page mapping */
+            spinlock_t *ptl = pte_lockptr(mm, vmf->pmd);
+            pte_t *ptep = vmf->pte;
+            pte_t entry;
+
+            spin_lock(ptl);
+            entry = pfn_pte(page_to_pfn(replica_page), vmf->vma->vm_page_prot);
+            if (vmf->flags & FAULT_FLAG_WRITE) {
+                entry = pte_mkwrite(entry, vmf->vma);
+                entry = pte_mkdirty(entry);
+            } else {
+                entry = pte_wrprotect(entry);
+            }
+            entry = pte_mkyoung(entry);
+            set_pte_at(mm, addr, ptep, entry);
+            update_mmu_cache(vmf->vma, addr, ptep);
+            spin_unlock(ptl);
+        } else {
+            /* 2MB hugepage mapping */
+            spinlock_t *pmd_ptl = pte_lockptr(mm, vmf->pmd);
+            pmd_t new_pmd;
+
+            spin_lock(pmd_ptl);
+            new_pmd = pfn_pmd(page_to_pfn(replica_page), vmf->vma->vm_page_prot);
+            if (vmf->flags & FAULT_FLAG_WRITE)
+                new_pmd = pmd_mkdirty(new_pmd);
+            set_pmd_at(mm, addr, vmf->pmd, new_pmd);
+            flush_tlb_page(vmf->vma, addr);
+            spin_unlock(pmd_ptl);
+        }
+    }
+
+    pr_info("[page_coherence] Mapped replica pfn=%lu at 0x%lx\n",
+            pfn_t_to_pfn(replica_pfn), vmf->address);
+    return 0;
+}
+
+#endif /* CONFIG_PAGE_COHERENCE */

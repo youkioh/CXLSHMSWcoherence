@@ -1436,6 +1436,7 @@ out_unlock:
  */
 vm_fault_t vmf_insert_pfn_pmd(struct vm_fault *vmf, pfn_t pfn, bool write)
 {
+	pr_info("[vmf_insert_pfn_pmd] is called.\n");
 	unsigned long addr = vmf->address & PMD_MASK;
 	struct vm_area_struct *vma = vmf->vma;
 	pgprot_t pgprot = vma->vm_page_prot;
@@ -1452,18 +1453,24 @@ vm_fault_t vmf_insert_pfn_pmd(struct vm_fault *vmf, pfn_t pfn, bool write)
 						(VM_PFNMAP|VM_MIXEDMAP));
 	BUG_ON((vma->vm_flags & VM_PFNMAP) && is_cow_mapping(vma->vm_flags));
 
-	if (addr < vma->vm_start || addr >= vma->vm_end)
+	if (addr < vma->vm_start || addr >= vma->vm_end) {
+		pr_err("[vmf_insert_pfn_pmd] addr is out of range.\n");
 		return VM_FAULT_SIGBUS;
+	}
 
 	if (arch_needs_pgtable_deposit()) {
 		pgtable = pte_alloc_one(vma->vm_mm);
-		if (!pgtable)
+		if (!pgtable) {
+			pr_err("[vmf_insert_pfn_pmd] pte_alloc_one failed.\n");
 			return VM_FAULT_OOM;
+		}
 	}
 
 	track_pfn_insert(vma, &pgprot, pfn);
 
 	insert_pfn_pmd(vma, addr, vmf->pmd, pfn, pgprot, write, pgtable);
+	pr_info("[vmf_insert_pfn_pmd] pfn %lx inserted at addr %lx.\n",
+		pfn_t_to_pfn(pfn), addr);
 	return VM_FAULT_NOPAGE;
 }
 EXPORT_SYMBOL_GPL(vmf_insert_pfn_pmd);

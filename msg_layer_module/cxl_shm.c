@@ -50,13 +50,22 @@ MODULE_DESCRIPTION("CXL Shared Memory Messaging Layer");
 MODULE_VERSION("1.0");
 
 /* =============================================================================
+ * PROTOTYPES
+ * ============================================================================= */
+
+ int cxl_kmsg_unicast(enum swmc_kmsg_type type, int ws_id, int dest_nid, struct payload_data *payload);
+ int cxl_kmsg_broadcast(enum swmc_kmsg_type type, int ws_id, struct payload_data *payload);
+ void cxl_kmsg_done(struct swmc_kmsg_message *message);
+ int cxl_kmsg_node_count(void);
+
+/* =============================================================================
  * CACHE MANAGEMENT
  * ============================================================================= */
 
  /**
  * __flush_processor_cache() - Low-level cache line flush
  */
-static inline void __flush_processor_cache(const void *addr, size_t len)
+static inline void __flush_processor_cache(const volatile void *addr, size_t len)
 {
     int64_t i;
     volatile char *buffer = (volatile char *)addr;
@@ -74,7 +83,7 @@ typedef enum {
     CXL_CACHE_HARD_FLUSH
 } cxl_cache_op_t;
 
-static inline void cxl_cache_operation(const void *addr, size_t len, cxl_cache_op_t op)
+static inline void cxl_cache_operation(const volatile void *addr, size_t len, cxl_cache_op_t op)
 {
     switch (op) {
     case CXL_CACHE_FLUSH:
@@ -551,7 +560,7 @@ static int __init init_cxl_shm(void)
 
     // ADD 90 GB to start_addr to account for the CXL shared memory region
     // TODO: Should change daxctl or ndctl or FamFS allocator later.
-    start_addr += 90 * 1024 * 1024 * 1024; // 90 GB
+    start_addr += 90UL << 30; // 90 GB
 
     /* Map TX windows: where this node sends to other nodes */
     for (i = 0; i < MAX_NODES; i++) {

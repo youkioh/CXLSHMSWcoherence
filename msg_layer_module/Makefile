@@ -1,11 +1,15 @@
 # Makefile for CXL SHM kernel modules
 
 obj-m += cxl_shm.o
-obj-m += test_cxl_sender.o
+# obj-m += test_cxl_sender.o
 
 # Kernel source directory - adjust path as needed
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
+
+# Ensure we use current kernel headers
+KERNEL_VERSION := $(shell uname -r)
+KERNEL_HEADERS := /lib/modules/$(KERNEL_VERSION)/build
 
 # Build targets
 all:

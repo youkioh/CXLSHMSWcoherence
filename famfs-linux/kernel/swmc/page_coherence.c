@@ -413,7 +413,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     pfn_t replica_pfn;
     int ret;
     bool write = iter->flags & IOMAP_WRITE;
-    bool leader; // is this fault is the leader fault of this cxl_hdm_offset?
+    // bool leader; // is this fault is the leader fault of this cxl_hdm_offset?
     struct payload_data payload;
     pmd_t *pmd;
     pmd_t pmd_val;

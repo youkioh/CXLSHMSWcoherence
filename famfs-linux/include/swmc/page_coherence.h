@@ -10,6 +10,7 @@ struct iomap_iter;
 
 #ifdef CONFIG_PAGE_COHERENCE
 
+
 /**
  * page_coherence_fault - Handle page coherence faults
  * @vmf: Fault information structure

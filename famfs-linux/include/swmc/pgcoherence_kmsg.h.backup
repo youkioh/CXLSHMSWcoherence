@@ -1,0 +1,88 @@
+#ifndef PGCOHERENCE_KMSG_H
+#define PGCOHERENCE_KMSG_H
+
+#define CL_SIZE 64                    /* Cache line size */
+#define CXL_KMSG_PAYLOAD_SIZE 28        /* Maximum message size */
+#define CXL_KMSG_WINDOW_OFFSET 0x4000 /* Offset for shared memory windows */
+
+/* Multi-node configuration */
+#define MAX_NODES 4
+#define WINDOWS_PER_NODE 4
+#define TOTAL_WINDOWS (MAX_NODES * WINDOWS_PER_NODE)
+
+/* Error codes for messaging */
+#define CXL_KMSG_ERR_NOT_READY -ENODEV   /* Messaging subsystem not ready */
+#define CXL_KMSG_ERR_NO_IMPL   -ENOSYS   /* No implementation registered */
+
+/* message types */
+enum cxl_kmsg_type {
+    CXL_KMSG_TYPE_FETCH = 0,
+    CXL_KMSG_TYPE_FETCH_ACK,
+    CXL_KMSG_TYPE_INVALIDATE,
+    CXL_KMSG_TYPE_INVALIDATE_ACK,
+    CXL_KMSG_TYPE_ERROR
+};
+
+/* CXL message header */
+struct cxl_kmsg_hdr {
+    enum cxl_kmsg_type type;
+    int page_order; // 0 for PAGE_SIZE, PMD_ORDER for PMD_SIZE
+    unsigned long cxl_hdm_offset;
+    int from_nid;
+    int to_nid;
+    size_t size;
+} __attribute__((packed));
+
+/* CXL message structure */
+struct cxl_kmsg_message {
+    struct cxl_kmsg_hdr header;
+    unsigned char payload[CXL_KMSG_PAYLOAD_SIZE];
+    volatile int ready;
+    unsigned long last_ticket;
+} __attribute__((packed, aligned(CL_SIZE)));
+
+/* Function pointer types for messaging operations */
+struct cxl_kmsg_ops {
+    struct cxl_kmsg_message *(*get)(size_t size);
+    void (*put)(struct cxl_kmsg_message *msg);
+    int (*send)(int dest_nid, struct cxl_kmsg_message *msg, size_t size);
+    int (*broadcast)(struct cxl_kmsg_message *msg, size_t size);
+    int (*poll)(struct cxl_kmsg_message **msg, int *from_nid);
+    int (*register_processor)(void (*processor)(struct cxl_kmsg_message *msg));
+    void (*unregister_processor)(void);
+};
+
+/* Core messaging interface - implemented in page_coherence.c */
+int cxl_kmsg_register_ops(const struct cxl_kmsg_ops *ops);
+void cxl_kmsg_unregister_ops(void);
+bool cxl_kmsg_is_ready(void);
+
+/* Public API functions - these check if ops are registered before calling */
+struct cxl_kmsg_message *cxl_kmsg_get(size_t size);
+void cxl_kmsg_put(struct cxl_kmsg_message *msg);
+int cxl_kmsg_send_message(int dest_nid, struct cxl_kmsg_message *msg, size_t size);
+int cxl_kmsg_broadcast_message(struct cxl_kmsg_message *msg, size_t size);
+int cxl_kmsg_poll_all_rx(struct cxl_kmsg_message **msg, int *from_nid);
+int cxl_kmsg_register_processor(void (*processor)(struct cxl_kmsg_message *msg));
+void cxl_kmsg_unregister_processor(void);
+
+/* High-level messaging functions - implemented in pgcoherence_kmsg.c */
+int send_fetch_message(unsigned long cxl_hdm_offset, int page_order);
+int send_invalidate_message(unsigned long cxl_hdm_offset, int page_order);
+int send_fetch_ack_message(int dest_nid, unsigned long cxl_hdm_offset, int page_order);
+int send_invalidate_ack_message(int dest_nid, unsigned long cxl_hdm_offset, int page_order);
+
+/* Context management functions */
+struct pending_msg_context;
+struct pending_msg_context *alloc_msg_context(unsigned long offset, int order);
+void free_msg_context(struct pending_msg_context *ctx);
+
+/* ACK handling functions */
+int handle_fetch_ack(struct cxl_kmsg_message *msg);
+int handle_invalidate_ack(struct cxl_kmsg_message *msg);
+
+/* Initialization functions */
+int pgcoherence_kmsg_init(void);
+void pgcoherence_kmsg_exit(void);
+
+#endif /* CXL_KMSG_H */

@@ -25,7 +25,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/iomap.h>
 #include <linux/rmap.h>
-#include <linux/page_coherence.h>
+#include <swmc/page_coherence.h>
 #include <asm/pgalloc.h>
 
 #define CREATE_TRACE_POINTS

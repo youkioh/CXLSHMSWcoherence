@@ -1,0 +1,511 @@
+/*
+ * pgcoherence_kmsg.c - CXL Page Coherence Messaging Interface
+ *
+ * This file implements the messaging interface for CXL page coherence.
+ * It provides an abstraction layer between page coherence logic and
+ * the actual messaging implementation (cxl_shm.c).
+ */
+
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/spinlock.h>
+#include <linux/completion.h>
+#include <linux/slab.h>
+#include <linux/err.h>
+#include <pgcoherence/pgcoherence_kmsg.h>
+
+/* =============================================================================
+ * GLOBAL STATE
+ * ============================================================================= */
+
+/* CXL messaging operations interface */
+static const struct cxl_kmsg_ops *cxl_ops = NULL;
+static DEFINE_SPINLOCK(ops_lock);
+
+/* Message handling state */
+struct pending_msg_context {
+    unsigned long cxl_hdm_offset;
+    int page_order;
+    struct completion fetch_completion;
+    struct completion invalidate_completion;
+    int fetch_ack_count;
+    int invalidate_ack_count;
+    spinlock_t lock;
+};
+
+static struct pending_msg_context *pending_contexts[MAX_NODES];
+static DEFINE_SPINLOCK(context_lock);
+
+/* =============================================================================
+ * MESSAGING INTERFACE IMPLEMENTATION
+ * ============================================================================= */
+
+/**
+ * cxl_kmsg_register_ops - Register messaging operations
+ * @ops: Pointer to operations structure
+ *
+ * This is called by cxl_shm.c when the module is loaded
+ */
+int cxl_kmsg_register_ops(const struct cxl_kmsg_ops *ops)
+{
+    unsigned long flags;
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Invalid ops pointer\n");
+        return -EINVAL;
+    }
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    if (cxl_ops) {
+        spin_unlock_irqrestore(&ops_lock, flags);
+        pr_warn("[pgcoherence_kmsg] Messaging ops already registered\n");
+        return -EEXIST;
+    }
+    
+    cxl_ops = ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    pr_info("[pgcoherence_kmsg] CXL messaging operations registered\n");
+    return 0;
+}
+EXPORT_SYMBOL(cxl_kmsg_register_ops);
+
+/**
+ * cxl_kmsg_unregister_ops - Unregister messaging operations
+ *
+ * This is called by cxl_shm.c when the module is unloaded
+ */
+void cxl_kmsg_unregister_ops(void)
+{
+    unsigned long flags;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    cxl_ops = NULL;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    pr_info("[pgcoherence_kmsg] CXL messaging operations unregistered\n");
+}
+EXPORT_SYMBOL(cxl_kmsg_unregister_ops);
+
+/**
+ * cxl_kmsg_is_ready - Check if messaging subsystem is ready
+ */
+bool cxl_kmsg_is_ready(void)
+{
+    unsigned long flags;
+    bool ready;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ready = (cxl_ops != NULL);
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    return ready;
+}
+EXPORT_SYMBOL(cxl_kmsg_is_ready);
+
+/* =============================================================================
+ * PUBLIC API FUNCTIONS
+ * ============================================================================= */
+
+struct cxl_kmsg_message *cxl_kmsg_get(size_t size)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cxl_shm module not loaded\n");
+        return ERR_PTR(CXL_KMSG_ERR_NOT_READY);
+    }
+    
+    return ops->get(size);
+}
+EXPORT_SYMBOL(cxl_kmsg_get);
+
+void cxl_kmsg_put(struct cxl_kmsg_message *msg)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    if (IS_ERR_OR_NULL(msg))
+        return;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cannot put message\n");
+        return;
+    }
+    
+    ops->put(msg);
+}
+EXPORT_SYMBOL(cxl_kmsg_put);
+
+int cxl_kmsg_send_message(int dest_nid, struct cxl_kmsg_message *msg, size_t size)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cxl_shm module not loaded\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    return ops->send(dest_nid, msg, size);
+}
+EXPORT_SYMBOL(cxl_kmsg_send_message);
+
+int cxl_kmsg_broadcast_message(struct cxl_kmsg_message *msg, size_t size)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cxl_shm module not loaded\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    return ops->broadcast(msg, size);
+}
+EXPORT_SYMBOL(cxl_kmsg_broadcast_message);
+
+int cxl_kmsg_poll_all_rx(struct cxl_kmsg_message **msg, int *from_nid)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cxl_shm module not loaded\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    return ops->poll(msg, from_nid);
+}
+EXPORT_SYMBOL(cxl_kmsg_poll_all_rx);
+
+int cxl_kmsg_register_processor(void (*processor)(struct cxl_kmsg_message *msg))
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cxl_shm module not loaded\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    return ops->register_processor(processor);
+}
+EXPORT_SYMBOL(cxl_kmsg_register_processor);
+
+void cxl_kmsg_unregister_processor(void)
+{
+    unsigned long flags;
+    const struct cxl_kmsg_ops *ops;
+    
+    spin_lock_irqsave(&ops_lock, flags);
+    ops = cxl_ops;
+    spin_unlock_irqrestore(&ops_lock, flags);
+    
+    if (!ops) {
+        pr_err("[pgcoherence_kmsg] Messaging not ready - cannot unregister processor\n");
+        return;
+    }
+    
+    ops->unregister_processor();
+}
+EXPORT_SYMBOL(cxl_kmsg_unregister_processor);
+
+/* =============================================================================
+ * CONTEXT MANAGEMENT
+ * ============================================================================= */
+
+struct pending_msg_context *alloc_msg_context(unsigned long offset, int order)
+{
+    struct pending_msg_context *ctx;
+    
+    ctx = kzalloc(sizeof(*ctx), GFP_KERNEL);
+    if (!ctx)
+        return NULL;
+        
+    ctx->cxl_hdm_offset = offset;
+    ctx->page_order = order;
+    init_completion(&ctx->fetch_completion);
+    init_completion(&ctx->invalidate_completion);
+    ctx->fetch_ack_count = 0;
+    ctx->invalidate_ack_count = 0;
+    spin_lock_init(&ctx->lock);
+    
+    return ctx;
+}
+EXPORT_SYMBOL(alloc_msg_context);
+
+void free_msg_context(struct pending_msg_context *ctx)
+{
+    if (ctx)
+        kfree(ctx);
+}
+EXPORT_SYMBOL(free_msg_context);
+
+/* =============================================================================
+ * MESSAGE SENDING FUNCTIONS
+ * ============================================================================= */
+
+int send_fetch_message(unsigned long cxl_hdm_offset, int page_order)
+{
+    struct cxl_kmsg_message *msg;
+    int ret;
+    
+    if (!cxl_kmsg_is_ready()) {
+        pr_err("[pgcoherence_kmsg] Cannot send fetch message - messaging not ready\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    msg = cxl_kmsg_get(sizeof(struct cxl_kmsg_hdr));
+    if (IS_ERR(msg)) {
+        pr_err("[pgcoherence_kmsg] Failed to allocate fetch message\n");
+        return PTR_ERR(msg);
+    }
+    
+    msg->header.type = CXL_KMSG_TYPE_FETCH;
+    msg->header.page_order = page_order;
+    msg->header.cxl_hdm_offset = cxl_hdm_offset;
+    msg->header.size = sizeof(struct cxl_kmsg_hdr);
+    
+    ret = cxl_kmsg_broadcast_message(msg, sizeof(struct cxl_kmsg_hdr));
+    if (ret) {
+        pr_err("[pgcoherence_kmsg] Failed to broadcast fetch message: %d\n", ret);
+        cxl_kmsg_put(msg);
+        return ret;
+    }
+    
+    cxl_kmsg_put(msg);
+    pr_info("[pgcoherence_kmsg] Sent fetch message for offset 0x%lx\n", cxl_hdm_offset);
+    return 0;
+}
+EXPORT_SYMBOL(send_fetch_message);
+
+int send_invalidate_message(unsigned long cxl_hdm_offset, int page_order)
+{
+    struct cxl_kmsg_message *msg;
+    int ret;
+    
+    if (!cxl_kmsg_is_ready()) {
+        pr_err("[pgcoherence_kmsg] Cannot send invalidate message - messaging not ready\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    msg = cxl_kmsg_get(sizeof(struct cxl_kmsg_hdr));
+    if (IS_ERR(msg)) {
+        pr_err("[pgcoherence_kmsg] Failed to allocate invalidate message\n");
+        return PTR_ERR(msg);
+    }
+    
+    msg->header.type = CXL_KMSG_TYPE_INVALIDATE;
+    msg->header.page_order = page_order;
+    msg->header.cxl_hdm_offset = cxl_hdm_offset;
+    msg->header.size = sizeof(struct cxl_kmsg_hdr);
+    
+    ret = cxl_kmsg_broadcast_message(msg, sizeof(struct cxl_kmsg_hdr));
+    if (ret) {
+        pr_err("[pgcoherence_kmsg] Failed to broadcast invalidate message: %d\n", ret);
+        cxl_kmsg_put(msg);
+        return ret;
+    }
+    
+    cxl_kmsg_put(msg);
+    pr_info("[pgcoherence_kmsg] Sent invalidate message for offset 0x%lx\n", cxl_hdm_offset);
+    return 0;
+}
+EXPORT_SYMBOL(send_invalidate_message);
+
+int send_fetch_ack_message(int dest_nid, unsigned long cxl_hdm_offset, int page_order)
+{
+    struct cxl_kmsg_message *msg;
+    int ret;
+    
+    if (!cxl_kmsg_is_ready()) {
+        pr_err("[pgcoherence_kmsg] Cannot send fetch_ack message - messaging not ready\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    msg = cxl_kmsg_get(sizeof(struct cxl_kmsg_hdr));
+    if (IS_ERR(msg)) {
+        pr_err("[pgcoherence_kmsg] Failed to allocate fetch_ack message\n");
+        return PTR_ERR(msg);
+    }
+    
+    msg->header.type = CXL_KMSG_TYPE_FETCH_ACK;
+    msg->header.page_order = page_order;
+    msg->header.cxl_hdm_offset = cxl_hdm_offset;
+    msg->header.to_nid = dest_nid;
+    msg->header.size = sizeof(struct cxl_kmsg_hdr);
+    
+    ret = cxl_kmsg_send_message(dest_nid, msg, sizeof(struct cxl_kmsg_hdr));
+    if (ret) {
+        pr_err("[pgcoherence_kmsg] Failed to send fetch_ack message to node %d: %d\n", dest_nid, ret);
+        cxl_kmsg_put(msg);
+        return ret;
+    }
+    
+    cxl_kmsg_put(msg);
+    pr_info("[pgcoherence_kmsg] Sent fetch_ack message to node %d for offset 0x%lx\n", dest_nid, cxl_hdm_offset);
+    return 0;
+}
+EXPORT_SYMBOL(send_fetch_ack_message);
+
+int send_invalidate_ack_message(int dest_nid, unsigned long cxl_hdm_offset, int page_order)
+{
+    struct cxl_kmsg_message *msg;
+    int ret;
+    
+    if (!cxl_kmsg_is_ready()) {
+        pr_err("[pgcoherence_kmsg] Cannot send invalidate_ack message - messaging not ready\n");
+        return CXL_KMSG_ERR_NOT_READY;
+    }
+    
+    msg = cxl_kmsg_get(sizeof(struct cxl_kmsg_hdr));
+    if (IS_ERR(msg)) {
+        pr_err("[pgcoherence_kmsg] Failed to allocate invalidate_ack message\n");
+        return PTR_ERR(msg);
+    }
+    
+    msg->header.type = CXL_KMSG_TYPE_INVALIDATE_ACK;
+    msg->header.page_order = page_order;
+    msg->header.cxl_hdm_offset = cxl_hdm_offset;
+    msg->header.to_nid = dest_nid;
+    msg->header.size = sizeof(struct cxl_kmsg_hdr);
+    
+    ret = cxl_kmsg_send_message(dest_nid, msg, sizeof(struct cxl_kmsg_hdr));
+    if (ret) {
+        pr_err("[pgcoherence_kmsg] Failed to send invalidate_ack message to node %d: %d\n", dest_nid, ret);
+        cxl_kmsg_put(msg);
+        return ret;
+    }
+    
+    cxl_kmsg_put(msg);
+    pr_info("[pgcoherence_kmsg] Sent invalidate_ack message to node %d for offset 0x%lx\n", dest_nid, cxl_hdm_offset);
+    return 0;
+}
+EXPORT_SYMBOL(send_invalidate_ack_message);
+
+/* =============================================================================
+ * ACK HANDLING FUNCTIONS
+ * ============================================================================= */
+
+int handle_fetch_ack(struct cxl_kmsg_message *msg)
+{
+    struct pending_msg_context *ctx;
+    unsigned long flags;
+    
+    if (!msg || msg->header.type != CXL_KMSG_TYPE_FETCH_ACK) {
+        pr_err("[pgcoherence_kmsg] Invalid fetch_ack message\n");
+        return -EINVAL;
+    }
+
+    pr_info("[pgcoherence_kmsg] Handling fetch_ack message from node %d for offset 0x%lx\n", 
+            msg->header.from_nid, msg->header.cxl_hdm_offset);
+
+    // Find matching context
+    spin_lock_irqsave(&context_lock, flags);
+    ctx = pending_contexts[msg->header.from_nid];
+    if (ctx && ctx->cxl_hdm_offset == msg->header.cxl_hdm_offset && 
+        ctx->page_order == msg->header.page_order) {
+        spin_lock(&ctx->lock);
+        ctx->fetch_ack_count++;
+        pr_info("[pgcoherence_kmsg] Fetch ACK count: %d/%d\n", ctx->fetch_ack_count, MAX_NODES - 1);
+        
+        if (ctx->fetch_ack_count >= MAX_NODES - 1) {
+            complete(&ctx->fetch_completion);
+        }
+        spin_unlock(&ctx->lock);
+    }
+    spin_unlock_irqrestore(&context_lock, flags);
+
+    return 0;
+}
+EXPORT_SYMBOL(handle_fetch_ack);
+
+int handle_invalidate_ack(struct cxl_kmsg_message *msg)
+{
+    struct pending_msg_context *ctx;
+    unsigned long flags;
+    
+    if (!msg || msg->header.type != CXL_KMSG_TYPE_INVALIDATE_ACK) {
+        pr_err("[pgcoherence_kmsg] Invalid invalidate_ack message\n");
+        return -EINVAL;
+    }
+
+    pr_info("[pgcoherence_kmsg] Handling invalidate_ack message from node %d for offset 0x%lx\n", 
+            msg->header.from_nid, msg->header.cxl_hdm_offset);
+
+    // Find matching context
+    spin_lock_irqsave(&context_lock, flags);
+    ctx = pending_contexts[msg->header.from_nid];
+    if (ctx && ctx->cxl_hdm_offset == msg->header.cxl_hdm_offset && 
+        ctx->page_order == msg->header.page_order) {
+        spin_lock(&ctx->lock);
+        ctx->invalidate_ack_count++;
+        pr_info("[pgcoherence_kmsg] Invalidate ACK count: %d/%d\n", ctx->invalidate_ack_count, MAX_NODES - 1);
+        
+        if (ctx->invalidate_ack_count >= MAX_NODES - 1) {
+            complete(&ctx->invalidate_completion);
+        }
+        spin_unlock(&ctx->lock);
+    }
+    spin_unlock_irqrestore(&context_lock, flags);
+
+    return 0;
+}
+EXPORT_SYMBOL(handle_invalidate_ack);
+
+/* =============================================================================
+ * INITIALIZATION
+ * ============================================================================= */
+
+int pgcoherence_kmsg_init(void)
+{
+    int i;
+    
+    pr_info("[pgcoherence_kmsg] Initializing CXL messaging interface\n");
+    
+    /* Initialize pending contexts array */
+    for (i = 0; i < MAX_NODES; i++) {
+        pending_contexts[i] = NULL;
+    }
+    
+    pr_info("[pgcoherence_kmsg] CXL messaging interface initialized\n");
+    return 0;
+}
+EXPORT_SYMBOL(pgcoherence_kmsg_init);
+
+void pgcoherence_kmsg_exit(void)
+{
+    pr_info("[pgcoherence_kmsg] Exiting CXL messaging interface\n");
+    
+    /* Clean up any pending contexts */
+    // TODO: Add cleanup logic if needed
+    
+    pr_info("[pgcoherence_kmsg] CXL messaging interface exited\n");
+}
+EXPORT_SYMBOL(pgcoherence_kmsg_exit);

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config PAGE_COHERENCE
+	bool "Page coherence support for CXL shared memory"
+	depends on X86_64
+	help
+	  Enable page coherence management for CXL shared memory environments.
+	  This provides functionality for managing replica pages across
+	  multiple CXL nodes to maintain memory coherence.
+
+	  If unsure, say N.

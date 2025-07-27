@@ -137,6 +137,8 @@ static bool __init invoke_need_callbacks(void)
 	for (i = 0; i < entries; i++) {
 		if (page_ext_ops[i]->need()) {
 			page_ext_ops[i]->offset = page_ext_size;
+			pr_info("page_ext_ops[%d] size=%zu, offset=%zu\n",
+				i, page_ext_ops[i]->size, page_ext_ops[i]->offset);
 			page_ext_size += page_ext_ops[i]->size;
 			need = true;
 		}

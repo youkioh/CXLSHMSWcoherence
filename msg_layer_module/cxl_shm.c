@@ -142,7 +142,7 @@ static inline int __build_kmsg(struct swmc_kmsg_message *msg,
     msg->header.from_nid = node_id; // Set to current node ID
     msg->header.to_nid = dest_nid;
 
-    if (!__validate_kmsg(msg)) {
+    if (__validate_kmsg(msg)) {
         pr_err("%s: Invalid message header\n", MODULE_NAME);
         return -EINVAL;
     }

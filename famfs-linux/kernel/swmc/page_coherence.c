@@ -584,4 +584,6 @@ int __init page_coherence_init(void)
 
 }
 
+subsys_initcall(page_coherence_init);
+
 #endif /* CONFIG_PAGE_COHERENCE */

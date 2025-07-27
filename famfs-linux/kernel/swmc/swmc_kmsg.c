@@ -39,6 +39,19 @@ int swmc_kmsg_process_message(struct swmc_kmsg_message *message)
 {
     swmc_kmsg_cbftn callback;
 
+    /* Validate message pointer */
+    if (!message) {
+        pr_err("swmc_kmsg: NULL message pointer\n");
+        return -EINVAL;
+    }
+
+    /* Validate message type range */
+    if (message->header.type < 0 || message->header.type >= SWMC_KMSG_TYPE_MAX) {
+        pr_err("swmc_kmsg: Invalid message type %d (max: %d)\n", 
+               message->header.type, SWMC_KMSG_TYPE_MAX - 1);
+        return -EINVAL;
+    }
+
     callback = swmc_kmsg_cbftns[message->header.type];
 
     if (callback != NULL) {

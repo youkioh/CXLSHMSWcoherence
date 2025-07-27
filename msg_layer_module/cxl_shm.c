@@ -477,7 +477,20 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
         win = ckh->win_rx[from_nid];
         if (!win) continue;
 
-        if (win_get(win, &msg)) {
+        if (win_get(win, &msg) == 0) {  /* Changed: check return value properly */
+            /* Validate message before processing */
+            if (!msg) {
+                pr_err("%s: Received NULL message from node %d\n", MODULE_NAME, from_nid);
+                continue;
+            }
+            
+            /* Additional validation for message header */
+            if (msg->header.type < 0 || msg->header.type >= SWMC_KMSG_TYPE_MAX) {
+                pr_err("%s: Invalid message type %d from node %d (hex: 0x%x)\n", 
+                       MODULE_NAME, msg->header.type, from_nid, msg->header.type);
+                continue;
+            }
+            
             ret = swmc_kmsg_process_message(msg);
             
             smp_mb();
@@ -590,6 +603,14 @@ static int __init init_cxl_shm(void)
         /* Note: Don't initialize RX windows - they're initialized by the sender */
     }
     
+    /* Register messaging operations with page coherence subsystem */
+    ret = swmc_kmsg_register_ops(&cxl_shm_ops);
+    if (ret) {
+        pr_info(KERN_ERR "%s: Failed to register messaging ops: %d\n", MODULE_NAME, ret);
+        kthread_stop(tsk_recv);
+        goto out_unmap;
+    }
+    
     /* Start receive handler thread */
     tsk_recv = kthread_run(recv_handler, cxl_kmsg_handler, "cxl_recv_%d", node_id);
     if (IS_ERR(tsk_recv)) {
@@ -599,13 +620,6 @@ static int __init init_cxl_shm(void)
     }
     cxl_kmsg_handler->recv_handler = tsk_recv;
 
-    /* Register messaging operations with page coherence subsystem */
-    ret = swmc_kmsg_register_ops(&cxl_shm_ops);
-    if (ret) {
-        pr_info(KERN_ERR "%s: Failed to register messaging ops: %d\n", MODULE_NAME, ret);
-        kthread_stop(tsk_recv);
-        goto out_unmap;
-    }
     
     pr_info(KERN_INFO "%s: Ready on CXL Shared Memory (Node ID: %d, %d TX + %d RX windows)\n", 
            MODULE_NAME, node_id, MAX_NODES-1, MAX_NODES-1);

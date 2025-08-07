@@ -27,8 +27,10 @@ static int dax_hmem_probe(struct platform_device *pdev)
 		flags = 0;
 
 	mri = dev->platform_data;
+	// dax_region = alloc_dax_region(dev, pdev->id, &mri->range,
+	// 			      mri->target_node, PMD_SIZE, flags);
 	dax_region = alloc_dax_region(dev, pdev->id, &mri->range,
-				      mri->target_node, PMD_SIZE, flags);
+				      mri->target_node, PAGE_SIZE, flags); // sungsu: use PAGE_SIZE instead of PMD_SIZE
 	if (!dax_region)
 		return -ENOMEM;
 

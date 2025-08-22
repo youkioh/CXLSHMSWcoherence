@@ -2644,8 +2644,8 @@ static int fuse_file_mmap(struct file *file, struct vm_area_struct *vma)
 	struct fuse_inode *fi = get_fuse_inode(inode);
 	int rc;
 
-	pr_info("[%s]: inode %lu, file %p, vma %p\n",
-		 __func__, inode->i_ino, file, vma);
+	// pr_info("[%s]: inode %lu, file %p, vma %p\n",
+	// 	 __func__, inode->i_ino, file, vma);
 
 	/* DAX mmap is superior to direct_io mmap */
 	if (FUSE_IS_VIRTIO_DAX(fi)) {

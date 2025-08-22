@@ -287,3 +287,6 @@ typedef int (*walk_hmem_fn)(struct device *dev, int target_nid,
 			    const struct resource *res);
 int walk_hmem_resources(struct device *dev, walk_hmem_fn fn);
 #endif
+
+void *replica_get_unlocked_entry(struct xa_state *xas, unsigned int order);
+void replica_put_unlocked_entry(struct xa_state *xas, void *entry, int mode);

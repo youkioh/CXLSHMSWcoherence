@@ -1,0 +1,490 @@
+/*
+ * Page Coherence Management for CXL Shared Memory
+ *
+ * This file implements page coherence functionality for managing 
+ * replica pages in CXL shared memory environments.
+ */
+
+#include <linux/mm.h>
+#include <linux/pgtable.h>
+#include <linux/slab.h>
+#include <linux/pfn_t.h>
+#include <linux/page_coherence.h>
+#include <linux/highmem.h>
+#include <linux/vmalloc.h>
+#include <linux/iomap.h>
+#include <linux/gfp.h>
+#include <linux/printk.h>
+#include <linux/memcontrol.h>
+#include <linux/hugetlb.h>    /* pfn_pmd, pmd_mkdirty, set_pmd_at */
+#include <linux/page_replication_info.h>
+#include <linux/xarray.h>
+#include <linux/completion.h>
+#include <linux/spinlock.h>
+#include <swmc/swmc_kmsg.h>
+
+#ifdef CONFIG_PAGE_COHERENCE
+
+/*
+ * Page Coherence Management for CXL Shared Memory
+ *
+ * This file implements page coherence functionality for managing
+ * replica pages in CXL shared memory environments.
+ */
+
+// initialize xarray for original pfn -> replica page mapping
+static DEFINE_XARRAY(original_to_replica_xa);
+
+/* Starts with message handling */
+unsigned long cxl_hdm_base = 0xe8000000; // dummy base PA for CXL HDM
+
+/* =============================================================================
+ * MESSAGE HANDLING FUNCTIONS
+ * ============================================================================= */
+
+// Fetch message handling
+// M-> S, S -> S, I -> I
+static int cxl_kmsg_handle_fetch(struct cxl_kmsg_message *msg)
+{
+    // Validate message
+    if (!msg || msg->header.type != CXL_KMSG_TYPE_FETCH) {
+        pr_err("[page_coherence] Invalid fetch message\n");
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Handling fetch message for offset 0x%lx\n", msg->header.cxl_hdm_offset);
+
+    // calculate original pfn from msg->header.cxl_hdm_offset
+    unsigned long original_phys_addr = cxl_hdm_base + msg->header.cxl_hdm_offset;
+    pfn_t original_pfn;
+
+    if (msg->header.page_order == 0) {
+        original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
+    }
+    else if (msg->header.page_order == PMD_ORDER) {
+        original_pfn = pfn_to_pfn_t(original_phys_addr >> PMD_SHIFT);
+    } else {
+        pr_err("[page_coherence] Invalid page order: %d\n", msg->header.page_order);
+        return -EINVAL;
+    }
+
+    // find replica page from original pfn
+    struct page *replica_page = xa_load(&original_to_replica_xa, original_pfn.val);
+
+    if (!replica_page) { // I -> I
+        pr_info("[page_coherence] No replica page found (I->I transition)\n");
+        send_fetch_ack_message(msg->header.from_nid, msg->header.cxl_hdm_offset, msg->header.page_order);
+    } else { // M -> S, S -> S
+        pr_info("[page_coherence] Replica page found (M->S or S->S transition)\n");
+        
+        // TODO: find all PTE mapped to replica page
+        // TODO: if there is any PTE with R/W=1, change R/W=0
+        // TODO: if there is no PTE with R/W=0
+
+        // send back fetch_ack message
+        send_fetch_ack_message(msg->header.from_nid, msg->header.cxl_hdm_offset, msg->header.page_order);
+    }
+
+    return 0;
+}
+
+// Fetch_ack message handling
+static int cxl_kmsg_handle_fetch_ack(struct cxl_kmsg_message *msg)
+{
+    // Delegate to pgcoherence_kmsg.c
+    return handle_fetch_ack(msg);
+}
+
+// Invalidate message handling
+// M -> I, S -> I, I -> I (M -> I is violated)
+static int cxl_kmsg_handle_invalidate(struct cxl_kmsg_message *msg)
+{
+    // Validate message
+    if (!msg || msg->header.type != CXL_KMSG_TYPE_INVALIDATE) {
+        pr_err("[page_coherence] Invalid invalidate message\n");
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Handling invalidate message for offset 0x%lx\n", msg->header.cxl_hdm_offset);
+
+    // calculate original pfn from msg->header.cxl_hdm_offset
+    unsigned long original_phys_addr = cxl_hdm_base + msg->header.cxl_hdm_offset;
+    pfn_t original_pfn;
+
+    if (msg->header.page_order == 0) {
+        original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
+    }
+    else if (msg->header.page_order == PMD_ORDER) {
+        original_pfn = pfn_to_pfn_t(original_phys_addr >> PMD_SHIFT);
+    } else {
+        pr_err("[page_coherence] Invalid page order: %d\n", msg->header.page_order);
+        return -EINVAL;
+    }
+
+    // find replica page from original pfn
+    struct page *replica_page = xa_load(&original_to_replica_xa, original_pfn.val);
+
+    if (!replica_page) { // I -> I
+        pr_info("[page_coherence] No replica page found (I->I transition)\n");
+        send_invalidate_ack_message(msg->header.from_nid, msg->header.cxl_hdm_offset, msg->header.page_order);
+    }
+    else { // M -> I, S -> I
+        pr_info("[page_coherence] Replica page found (M->I or S->I transition)\n");
+        
+        // TODO: find all PTE mapped to replica page
+        // TODO: if there is any PTE with R/W=1, violated (no direct I -> M) 
+        // TODO: -> send error and kernel panic
+        // TODO: if there is no PTE with R/W=1 (S -> I)
+        // TODO: -> free replica page, change linked_page to NULL
+
+        // For now, assume S->I transition and clean up
+        xa_erase(&original_to_replica_xa, original_pfn.val);
+        if (msg->header.page_order > 0)
+            __free_pages(replica_page, msg->header.page_order);
+        else
+            __free_page(replica_page);
+            
+        pr_info("[page_coherence] Freed replica page and removed from xa\n");
+        
+        send_invalidate_ack_message(msg->header.from_nid, msg->header.cxl_hdm_offset, msg->header.page_order);
+    }
+
+    return 0;
+}
+
+// Invalidate_ack message handling
+static int cxl_kmsg_handle_invalidate_ack(struct cxl_kmsg_message *msg)
+{
+    // Delegate to pgcoherence_kmsg.c
+    return handle_invalidate_ack(msg);
+}
+
+// Error message handling
+static int cxl_kmsg_handle_error(struct cxl_kmsg_message *msg)
+{
+    // Validate message
+    if (!msg || msg->header.type != CXL_KMSG_TYPE_ERROR) {
+        pr_err("[page_coherence] Invalid error message\n");
+        return -EINVAL;
+    }
+
+    pr_err("[page_coherence] Received error message from node %d for offset 0x%lx\n",
+           msg->header.from_nid, msg->header.cxl_hdm_offset);
+
+    // TODO: Handle error appropriately
+    return 0;
+}
+
+// Message handling entry point (will be called by msg_layer module)
+static void cxl_kmsg_process(struct cxl_kmsg_message *msg)
+{
+    int ret = 0;
+
+    if (!msg) {
+        pr_err("[page_coherence] Invalid message\n");
+        return;
+    }
+
+    switch (msg->header.type) {
+    case CXL_KMSG_TYPE_FETCH:
+        ret = cxl_kmsg_handle_fetch(msg);
+        break;
+    case CXL_KMSG_TYPE_INVALIDATE:
+        ret = cxl_kmsg_handle_invalidate(msg);
+        break;
+    case CXL_KMSG_TYPE_FETCH_ACK:
+        ret = cxl_kmsg_handle_fetch_ack(msg);
+        break;
+    case CXL_KMSG_TYPE_INVALIDATE_ACK:
+        ret = cxl_kmsg_handle_invalidate_ack(msg);
+        break;
+    case CXL_KMSG_TYPE_ERROR:
+        ret = cxl_kmsg_handle_error(msg);
+        break;
+    default:
+        pr_err("[page_coherence] Unknown message type: %d\n", msg->header.type);
+        ret = -EINVAL;
+        break;
+    }
+
+    if (ret)
+        pr_err("[page_coherence] Message processing failed: %d\n", ret);
+        
+    // Free the message
+    cxl_kmsg_put(msg);
+}
+
+/**
+ * allocate_replica_page - Allocate a new page or compound page for replica
+ * @order: Page order (0 for single page, PMD_ORDER for 2MB)
+ *
+ * Returns: Allocated page pointer on success, NULL on failure
+ */
+static struct page *allocate_replica_page(unsigned int order)
+{
+    struct page *page;
+    gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE;
+
+    /* compound allocation for huge pages */
+    if (order > 0)
+        gfp_flags |= __GFP_COMP;
+
+    page = alloc_pages(gfp_flags, order);
+    if (!page) {
+        pr_err("[page_coherence] Failed to allocate replica page (order=%u)\n", order);
+        return NULL;
+    }
+
+    pr_info("[page_coherence] Allocated replica page (order=%u, pfn=%lu)\n",
+            order, page_to_pfn(page));
+    return page;
+}
+
+/**
+ * copy_page_data - Copy data from source to destination page
+ * @dst_page: Destination page
+ * @src_kaddr: Source kernel virtual address
+ * @size: Size to copy (PAGE_SIZE or PMD_SIZE)
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+static int copy_page_data(struct page *dst_page, void *src_kaddr, size_t size)
+{
+    void *dst_kaddr;
+    unsigned int nr_pages = size >> PAGE_SHIFT;
+    unsigned int i;
+
+    if (!dst_page || !src_kaddr) {
+        pr_err("[page_coherence] Invalid parameters for page copy\n");
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Copying %zu bytes (%u pages) from %p to pfn=%lu\n",
+            size, nr_pages, src_kaddr, page_to_pfn(dst_page));
+
+    if (nr_pages == 1) {
+        dst_kaddr = kmap_local_page(dst_page);
+        if (!dst_kaddr) {
+            pr_err("[page_coherence] Failed to map destination page\n");
+            return -ENOMEM;
+        }
+        memcpy(dst_kaddr, src_kaddr, PAGE_SIZE);
+        kunmap_local(dst_kaddr);
+    } else {
+        for (i = 0; i < nr_pages; i++) {
+            struct page *subpage = nth_page(dst_page, i);
+            void *src_offset = src_kaddr + (i * PAGE_SIZE);
+
+            dst_kaddr = kmap_local_page(subpage);
+            if (!dst_kaddr) {
+                pr_err("[page_coherence] Failed to map subpage %u\n", i);
+                return -ENOMEM;
+            }
+            memcpy(dst_kaddr, src_offset, PAGE_SIZE);
+            kunmap_local(dst_kaddr);
+        }
+    }
+
+    pr_info("[page_coherence] Successfully copied page data\n");
+    return 0;
+}
+
+/**
+ * page_coherence_fault - Handle page coherence faults
+ * @vmf: Fault information structure
+ * @iter: IOMAP iterator
+ * @size: Size of the fault (PAGE_SIZE or PMD_SIZE)
+ * @kaddr: Kernel virtual address of the original page
+ * @pfn: Pointer to the page frame number, will be updated to replica PFN
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
+                         size_t size, void *kaddr, pfn_t *pfn)
+{
+    struct page *replica_page;
+    unsigned int order;
+    pfn_t original_pfn = *pfn;
+    pfn_t replica_pfn;
+    int ret;
+    bool write = iter->flags & IOMAP_WRITE;
+    struct page_replication_info *replica_info;
+
+    if (!vmf || !iter || !kaddr || !pfn) {
+        pr_err("[page_coherence] Invalid parameters\n");
+        return -EINVAL;
+    }
+
+    /* Determine page order */
+    if (size == PMD_SIZE)
+        order = PMD_ORDER;
+    else if (size == PAGE_SIZE)
+        order = 0;
+    else {
+        pr_err("[page_coherence] Unsupported size: %zu\n", size);
+        return -EINVAL;
+    }
+
+    pr_info("[page_coherence] Fault at 0x%lx: size=%zu order=%u original pfn=%lu\n",
+        vmf->address, size, order, pfn_t_to_pfn(original_pfn));
+    
+    // if pmd is already allocated, get the existing pmd.
+    pmd_t *pmd = vmf->pmd;
+    // pr_info("[page_coherence] vmf->pmd: %p\n", pmd);
+    pmd_t pmd_val = *pmd;
+
+    if (!pmd_none(pmd_val)) { // S -> M
+        pr_info("[page_coherence] PMD already allocated, checking conditions...\n");
+        if (pmd_present(pmd_val) && write && !pmd_write(*pmd) && !pmd_dirty(*pmd)) {
+            pr_info("[page_coherence] Skipping replication and copying for write fault on non-writable PMD.\n");
+            replica_pfn.val = pmd_pfn(pmd_val) | (original_pfn.val & PFN_FLAGS_MASK);
+            *pfn = replica_pfn;
+            pr_info("[page_coherence] Updated pfn to existing PMD PFN: %lu\n",
+                    pfn_t_to_pfn(replica_pfn));
+            return 0;
+        }
+    }
+
+    // if pmd is not allocated, we need to replicate the page
+    pr_info("[page_coherence] PMD is not allocated, proceeding with replication.\n");
+    // I -> S, I -> M
+
+    // Get CXL HDM offset for this fault
+    unsigned long cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
+
+    // broadcast fetch message
+    if (cxl_kmsg_is_ready()) {
+        pr_info("[page_coherence] Broadcasting fetch message for offset 0x%lx\n", cxl_hdm_offset);
+        ret = send_fetch_message(cxl_hdm_offset, order);
+        if (ret) {
+            pr_err("[page_coherence] Failed to send fetch message: %d\n", ret);
+            // Continue anyway for now - could implement fallback
+        } else {
+            // TODO: wait for # of fetch_ack == MAX_NODES - 1
+            // For now, just log that we would wait
+            pr_info("[page_coherence] Would wait for fetch ACKs from %d nodes\n", MAX_NODES - 1);
+        }
+    } else {
+        pr_warn("[page_coherence] CXL messaging not ready - skipping fetch message\n");
+    }
+
+    if (write) { // I -> M
+        if (cxl_kmsg_is_ready()) {
+            pr_info("[page_coherence] Broadcasting invalidate message for offset 0x%lx\n", cxl_hdm_offset);
+            ret = send_invalidate_message(cxl_hdm_offset, order);
+            if (ret) {
+                pr_err("[page_coherence] Failed to send invalidate message: %d\n", ret);
+                // Continue anyway for now - could implement fallback
+            } else {
+                // TODO: wait for # of invalidate_ack == MAX_NODES - 1
+                // For now, just log that we would wait
+                pr_info("[page_coherence] Would wait for invalidate ACKs from %d nodes\n", MAX_NODES - 1);
+            }
+        } else {
+            pr_warn("[page_coherence] CXL messaging not ready - skipping invalidate message\n");
+        }
+    }
+
+    /* Allocate a replica page or compound page */
+    replica_page = allocate_replica_page(order);
+    if (!replica_page)
+        return -ENOMEM;
+
+    /* Copy data from original address to replica */
+    ret = copy_page_data(replica_page, kaddr, size);
+    if (ret) {
+        pr_err("[page_coherence] Data copy failed: %d\n", ret);
+        if (order > 0)
+            __free_pages(replica_page, order);
+        else
+            __free_page(replica_page);
+        return ret;
+    }
+    
+    // just to check if devdax has struct page. not to do with this function
+    struct page *original_page_ptr = pfn_t_to_page(original_pfn);
+    if (!original_page_ptr) {
+        pr_err("[page_coherence] Invalid original page pointer\n");
+        if (order > 0)
+            __free_pages(replica_page, order);
+        else
+            __free_page(replica_page);
+    return -EINVAL;
+    }
+    pr_info("[page_coherence] Original page: %p, replica page: %p\n", original_page_ptr, replica_page);
+
+    /* Register original pfn <-> replica pfn mapping with page replication info */
+    
+    // original pfn -> replica pfn with custom xarrays
+    // key: original_pfn.val, value: replica_page
+    xa_store(&original_to_replica_xa, original_pfn.val, replica_page, GFP_KERNEL);
+
+    // replica page -> original pfn with page extension for local reclamation
+
+
+    replica_info = get_page_replication_info(replica_page);
+    if (!replica_info) {
+        pr_err("[page_coherence] Failed to get replica page replication info\n");
+        if (order > 0)
+            __free_pages(replica_page, order);
+        else
+            __free_page(replica_page);
+        return -EINVAL;
+    }
+
+    // Link the replica page to the original page
+    replica_info->original_pfn = original_pfn; // Store original pfn
+    
+    // Update page replication info
+    set_page_replication_info(replica_page, replica_info);
+
+    pr_info("[page_coherence] Linked replica page %p to original pfn %lu\n",
+            replica_page, pfn_t_to_pfn(original_pfn));
+
+    /* Build new PFN with preserved flags and update */
+    replica_pfn.val = page_to_pfn(replica_page) |
+                      (original_pfn.val & PFN_FLAGS_MASK);
+    *pfn = replica_pfn;
+
+
+    pr_info("[page_coherence] Replicated pfn=%lu at 0x%lx\n",
+            pfn_t_to_pfn(replica_pfn), vmf->address);
+    return 0;
+}
+
+/**
+ * page_coherence_init - Initialize page coherence subsystem
+ *
+ * Returns: 0 on success, negative error code on failure
+ */
+int page_coherence_init(void)
+{
+    int ret;
+    
+    pr_info("[page_coherence] Initializing page coherence subsystem\n");
+    
+    /* Initialize messaging subsystem first */
+    ret = pgcoherence_kmsg_init();
+    if (ret) {
+        pr_err("[page_coherence] Failed to initialize messaging subsystem: %d\n", ret);
+        return ret;
+    }
+    
+    /* Register our message processor */
+    if (cxl_kmsg_is_ready()) {
+        ret = cxl_kmsg_register_processor(cxl_kmsg_process);
+        if (ret) {
+            pr_err("[page_coherence] Failed to register message processor: %d\n", ret);
+            pgcoherence_kmsg_exit();
+            return ret;
+        }
+        pr_info("[page_coherence] Message processor registered\n");
+    } else {
+        pr_info("[page_coherence] CXL messaging not ready - will register processor when available\n");
+    }
+    
+    pr_info("[page_coherence] Page coherence subsystem initialized\n");
+    return 0;
+}
+
+#endif /* CONFIG_PAGE_COHERENCE */

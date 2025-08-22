@@ -1996,10 +1996,15 @@ void try_to_unmap(struct folio *folio, enum ttu_flags flags)
 		.anon_lock = folio_lock_anon_vma_read,
 	};
 
-	if (flags & TTU_RMAP_LOCKED)
+	if (flags & TTU_RMAP_LOCKED) {
+		// pr_info("%s: rmap_walk_locked called with folio %p\n",
+		// 	__func__, folio);
 		rmap_walk_locked(folio, &rwc);
-	else
+	} else {
+		// pr_info("%s: rmap_walk called with folio %p\n",
+		// 	__func__, folio);
 		rmap_walk(folio, &rwc);
+	}
 }
 
 /*
@@ -2718,12 +2723,19 @@ done:
 
 void rmap_walk(struct folio *folio, struct rmap_walk_control *rwc)
 {
-	if (unlikely(folio_test_ksm(folio)))
+	if (unlikely(folio_test_ksm(folio))) {
+		// pr_info("%s: rmap_walk called with folio %p which is KSM page\n",
+		// 	__func__, folio);
 		rmap_walk_ksm(folio, rwc);
-	else if (folio_test_anon(folio))
+	} else if (folio_test_anon(folio)) {
+		// pr_info("%s: rmap_walk called with folio %p which is anon page\n",
+		// 	__func__, folio);
 		rmap_walk_anon(folio, rwc, false);
-	else
+	} else {
+		// pr_info("%s: rmap_walk called with folio %p which is file page\n",
+		// 	__func__, folio);
 		rmap_walk_file(folio, rwc, false);
+	}
 }
 
 /* Like rmap_walk, but caller holds relevant rmap lock */

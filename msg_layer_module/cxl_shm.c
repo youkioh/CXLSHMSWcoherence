@@ -23,6 +23,7 @@
 #include <linux/device.h>
 #include <linux/types.h>
 #include <swmc/swmc_kmsg.h>
+#include <swmc/page_coherence.h>
 
 /* =============================================================================
  * MODULE CONFIGURATION
@@ -555,6 +556,15 @@ static int __init init_cxl_shm(void)
     pr_info(KERN_INFO "%s: DAX device %s mapped at physical address 0x%llx\n", 
            MODULE_NAME, dax_name, start_addr);
 
+    // cxl_hdm_base_addr initialization
+    unsigned long cxl_hdm_base = start_addr;
+
+    pr_info("[%s] Setting CXL HDM base address to 0x%lx\n", __func__, cxl_hdm_base);
+
+    set_cxl_hdm_base(cxl_hdm_base);
+
+    pr_info("[%s] CXL HDM base set to: 0x%lx\n", __func__, get_cxl_hdm_base());
+    
     /* Allocate handler structure */
     cxl_kmsg_handler = kmalloc(sizeof(struct cxl_kmsg_handle), GFP_KERNEL);
     if (!cxl_kmsg_handler) {

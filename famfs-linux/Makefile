@@ -2,7 +2,7 @@
 VERSION = 6
 PATCHLEVEL = 14
 SUBLEVEL = 0
-EXTRAVERSION = -famfs-coherence+
+EXTRAVERSION = -famfs-coherence-eviction+
 NAME = Baby Opossum Posse
 
 # *DOCUMENTATION*

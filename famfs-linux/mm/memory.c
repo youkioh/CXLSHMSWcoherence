@@ -2266,6 +2266,9 @@ int vm_insert_pages(struct vm_area_struct *vma, unsigned long addr,
 			struct page **pages, unsigned long *num)
 {
 	const unsigned long end_addr = addr + (*num * PAGE_SIZE) - 1;
+	pr_info("[%s]: VM_MIXEDMAP %d, VM_PFNMAP %d, addr %lx, num %lu\n",
+		__func__, !!(vma->vm_flags & VM_MIXEDMAP),
+		!!(vma->vm_flags & VM_PFNMAP), addr, *num);
 
 	if (addr < vma->vm_start || end_addr >= vma->vm_end)
 		return -EFAULT;

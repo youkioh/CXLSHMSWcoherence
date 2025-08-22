@@ -25,8 +25,8 @@
 #include <linux/mmu_notifier.h>
 #include <linux/iomap.h>
 #include <linux/rmap.h>
-#include <swmc/page_coherence.h>
 #include <asm/pgalloc.h>
+#include <swmc/page_coherence.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/fs_dax.h>
@@ -51,6 +51,13 @@ static int __init init_dax_wait_table(void)
 }
 fs_initcall(init_dax_wait_table);
 
+// TODO: delete this debug
+#define ENTIRELY_MAPPED		0x800000
+#define FOLIO_PAGES_MAPPED	(ENTIRELY_MAPPED - 1)
+static inline unsigned int folio_nr_pages_mapped(const struct folio *folio)
+{
+	return atomic_read(&folio->_nr_pages_mapped) & FOLIO_PAGES_MAPPED;
+}
 /*
  * DAX pagecache entries use XArray value entries so they can't be mistaken
  * for pages.  We use one bit for locking, one bit for the entry size (PMD)
@@ -236,6 +243,36 @@ static void *get_unlocked_entry(struct xa_state *xas, unsigned int order)
 	}
 }
 
+/* for use in page_replication.c */
+void *replica_get_unlocked_entry(struct xa_state *xas, unsigned int order)
+{
+	void *entry;
+	struct wait_exceptional_entry_queue ewait;
+	wait_queue_head_t *wq;
+
+	init_wait(&ewait.wait);
+	ewait.wait.func = wake_exceptional_entry_func;
+
+	for (;;) {
+		entry = xas_find_conflict(xas);
+		if (!entry || WARN_ON_ONCE(!xa_is_value(entry)))
+			return entry;
+		if (dax_entry_order(entry) < order)
+			return XA_RETRY_ENTRY;
+		if (!dax_is_locked(entry))
+			return entry;
+
+		wq = dax_entry_waitqueue(xas, entry, &ewait.key);
+		prepare_to_wait_exclusive(wq, &ewait.wait,
+					  TASK_UNINTERRUPTIBLE);
+		xas_unlock_irq(xas);
+		xas_reset(xas);
+		schedule();
+		finish_wait(wq, &ewait.wait);
+		xas_lock_irq(xas);
+	}
+}
+
 /*
  * The only thing keeping the address space around is the i_pages lock
  * (it's cycled in clear_inode() after removing the entries from i_pages)
@@ -260,6 +297,14 @@ static void wait_entry_unlocked(struct xa_state *xas, void *entry)
 	xas_unlock_irq(xas);
 	schedule();
 	finish_wait(wq, &ewait.wait);
+}
+
+/* for use in page_replication.c */
+void replica_put_unlocked_entry(struct xa_state *xas, void *entry, int mode)
+{
+	enum dax_wake_mode wake_mode = mode;
+	if (entry && !dax_is_conflict(entry))
+		dax_wake_entry(xas, entry, wake_mode);
 }
 
 static void put_unlocked_entry(struct xa_state *xas, void *entry,
@@ -870,16 +915,27 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		const struct iomap_iter *iter, void *entry, pfn_t pfn,
 		unsigned long flags)
 {
+	struct folio* folio = pfn_folio(pfn_t_to_pfn(pfn));
+	pr_info("[%s] before dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
+		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	void *new_entry = dax_make_entry(pfn, flags);
 	bool write = iter->flags & IOMAP_WRITE;
 	bool dirty = write && !dax_fault_is_synchronous(iter, vmf->vma);
 	bool shared = iter->iomap.flags & IOMAP_F_SHARED;
 
+	pr_info("[%s] after dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
+		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+
+	pr_info("[%s] shared: %d, dax_is_zero_entry: %d, dax_is_empty_entry: %d, flags: 0x%lx\n",
+		__func__, shared, dax_is_zero_entry(entry),
+		dax_is_empty_entry(entry), flags);
 	if (dirty)
 		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 
 	if (shared || (dax_is_zero_entry(entry) && !(flags & DAX_ZERO_PAGE))) {
+		pr_info("[%s] unmapping entry of pfn: %lu, nr_pages_mapped=%u\n",
+			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		unsigned long index = xas->xa_index;
 		/* we are replacing a zero page with block mapping */
 		if (dax_is_pmd_entry(entry))
@@ -889,7 +945,11 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 			unmap_mapping_pages(mapping, index, 1, false);
 	}
 
+	pr_info("[%s] before xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
+		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	xas_reset(xas);
+	pr_info("[%s] after xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
+		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	xas_lock_irq(xas);
 	if (shared || dax_is_zero_entry(entry) || dax_is_empty_entry(entry)) {
 		void *old;
@@ -897,6 +957,8 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		dax_disassociate_entry(entry, mapping, false);
 		dax_associate_entry(new_entry, mapping, vmf->vma, vmf->address,
 				shared);
+		pr_info("[%s] after dax_associate_entry of pfn: %lu, nr_pages_mapped=%u\n",
+			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		/*
 		 * Only swap our new entry into the page cache if the current
 		 * entry is a zero page or an empty entry.  If a normal PTE or
@@ -906,6 +968,8 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		 * tree and dirty it if necessary.
 		 */
 		old = dax_lock_entry(xas, new_entry);
+		pr_info("[%s] after dax_lock_entry of pfn: %lu, nr_pages_mapped=%u\n",
+			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		WARN_ON_ONCE(old != xa_mk_value(xa_to_value(entry) |
 					DAX_LOCKED));
 		entry = new_entry;
@@ -1692,19 +1756,48 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		return pmd ? VM_FAULT_FALLBACK : dax_fault_return(err);
 
 #ifdef CONFIG_PAGE_COHERENCE
-	// entry point to the page coherence management code
-	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn);
-	if (ret)
-		return dax_fault_return(ret);
-	pr_info("[dax_fault_iter] page_coherence injected mapping for pfn %lu at addr 0x%lx\n",
-		pfn_t_to_pfn(pfn), vmf->address);
+	// // entry point to the page coherence management code
+	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
+	// if (ret == VM_FAULT_NOPAGE) return VM_FAULT_NOPAGE;
 
-    // /* Mapping done in page_coherence_fault, skip dax_insert and vmf_insert */
-	// return VM_FAULT_NOPAGE;
+    if (ret) {
+		pr_info("[%s] page_coherence_fault returned with error %d for pfn %lu at addr 0x%lx\n",
+			__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
+		if (ret == -EAGAIN) {
+			// sungsu: retry the fault
+			pr_info("[dax_fault_iter] retrying the fault for pfn %lu at addr 0x%lx\n",
+				pfn_t_to_pfn(pfn), vmf->address);
+			// return VM_FAULT_RETRY;
+		}
+		if (ret == -ENOMEM) {
+			// sungsu: return VM_FAULT_OOM
+			pr_info("[dax_fault_iter] returning VM_FAULT_OOM for pfn %lu at addr 0x%lx\n",
+				pfn_t_to_pfn(pfn), vmf->address);
+			// return VM_FAULT_OOM;
+		}
+		if (ret < 0) {
+			pr_info("[%s] other error %d for pfn %lu at addr 0x%lx\n",
+				__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
+			// return dax_fault_return(ret);
+		}
+	}
 #endif // CONFIG_PAGE_COHERENCE
-	
+
+	// sungsu: print the nr_pages_mapped of folio
+	struct folio *folio = pfn_folio(pfn_t_to_pfn(pfn));
+	// pr_info("[dax_fault_iter] page_coherence_fault done, pfn: %lu, nr_pages_mapped: %d\n",
+	// 	pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+
+	pr_info("[%s] DEBUG_MAPPING: dax_iomap_direct_access finished for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
+	__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
     /* Normal DAX fs insertion path */
 	*entry = dax_insert_entry(xas, vmf, iter, *entry, pfn, entry_flags);
+
+	pr_info("[%s] DEBUG_MAPPING: dax_insert_entry done for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
+		__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
+	// // sungsu: print the nr_pages_mapped of folio
+	// pr_info("[dax_fault_iter] dax_insert_entry done, pfn: %lu, nr_pages_mapped: %d\n",
+	// 	pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 
 	if (write && iomap->flags & IOMAP_F_SHARED) {
 		err = dax_iomap_copy_around(pos, size, size, srcmap, kaddr);
@@ -1717,9 +1810,38 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 
 	/* insert PMD pfn */
 	if (pmd) {
+		if (vmf->vma->vm_file) {
+			pr_info("MY_DEBUG: This is a FILE VMA. file=%s, mapping=%p\n",
+					vmf->vma->vm_file->f_path.dentry->d_name.name,
+					vmf->vma->vm_file->f_mapping);
+		} else {
+			pr_info("MY_DEBUG: This is an ANONYMOUS VMA. No file associated.\n");
+		}
 		// sungsu: vmf_insert_pfn_pmd is called
 		pr_info("[dax_fault_iter] Call vmf_insert_pfn_pmd() for PMD pfn insertion.\n");
-		return vmf_insert_pfn_pmd(vmf, pfn, write);
+		*pfnp = pfn;
+		
+		ret = vmf_insert_pfn_pmd(vmf, pfn, write);
+		pr_info("[%s] DEBUG_MAPPING: vmf_insert_pfn_pmd returned %d for pfn %lu at addr 0x%lx, mapping: %p\n, mapcount: %d\n",
+			__func__, ret, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
+
+		// check every pid and pte that maps this pfn
+		struct address_space *temp_mapping = vmf->vma->vm_file->f_mapping;
+		int count = 1UL << dax_entry_order(entry);
+		int index = xas->xa_index & ~(count - 1);
+		int end = index + count - 1;
+		i_mmap_lock_read(temp_mapping);
+		struct vm_area_struct *vma;
+		vma_interval_tree_foreach(vma, &temp_mapping->i_mmap, index, end) {
+			pr_info("[%s] DEBUG_MAPPING: vma %p, start: 0x%lx, end: 0x%lx, vm_flags: 0x%lx, anon_vma: %p, vm_ops: %p, vm_file: %p, address_space %p, file name:%s\n",
+				__func__, vma, vma->vm_start, vma->vm_end, vma->vm_flags, vma->anon_vma, vma->vm_ops, vma->vm_file, vma->vm_file->f_mapping, vma->vm_file->f_path.dentry->d_name.name);
+		}
+		i_mmap_unlock_read(temp_mapping);
+
+		print_page_info(&folio->page, "dax_fault_iter");
+		print_page_info(&folio->page + 1, "dax_fatul_iter + 1");
+		print_page_info(&folio->page + 2, "dax_fault_iter + 2");
+		return ret;
 	}
 
 	/* insert PTE pfn */
@@ -1908,14 +2030,13 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, pfn_t *pfnp,
 	}
 
 	iter.pos = (loff_t)xas.xa_index << PAGE_SHIFT;
-	// counter value for the number of PMD entries
-	int pmd_entries = 0;
+	iter.pos = (loff_t)xas.xa_index << PAGE_SHIFT;
 	while (iomap_iter(&iter, ops) > 0) {
-		pr_info("[dax_iomap_pmd_fault] pdm_entries: %d\n", pmd_entries);
-		pmd_entries++;
 		if (iomap_length(&iter) < PMD_SIZE)
 			continue; /* actually breaks out of the loop */
 		ret = dax_fault_iter(vmf, &iter, pfnp, &xas, &entry, true);
+		// folio = pfn_folio(pfn_t_to_pfn(*pfnp));
+		// pr_info("[%s] dax_fault_iter returned. ret: %d, nr_pages_mapped of folio: %d\n",
 		if (ret != VM_FAULT_FALLBACK)
 			iter.processed = PMD_SIZE;
 	}

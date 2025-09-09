@@ -175,17 +175,18 @@ static int swmc_kmsg_handle_fetch(struct swmc_kmsg_message *msg)
 
     // calculate original pfn from payload->cxl_hdm_offset
     unsigned long original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
+    pr_info("[%s] Original physical address calculated: 0x%lx\n", __func__, original_phys_addr);
+    pr_info("[%s] Page order: %d\n", __func__, payload->page_order);
     pfn_t original_pfn;
 
-    if (payload->page_order == 0) {
+    if (payload->page_order == 0 || payload->page_order == PMD_ORDER) {
         original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
     }
-    else if (payload->page_order == PMD_ORDER) {
-        original_pfn = pfn_to_pfn_t(original_phys_addr >> PMD_SHIFT);
-    } else {
+    else {
         pr_err("[%s] Invalid page order: %d\n", __func__, payload->page_order);
         return -EINVAL;
     }
+    pr_info("[%s] Original PFN calculated: 0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
 
     // find page replica from original pfn
     struct page *page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
@@ -263,19 +264,21 @@ static int swmc_kmsg_handle_invalidate(struct swmc_kmsg_message *msg)
     pr_info("[page_coherence] Handling invalidate message for offset 0x%lx\n", payload->cxl_hdm_offset);
     
     // calculate original pfn from payload->cxl_hdm_offset
+    // phys_addr_t original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
     unsigned long original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
+    pr_info("[page_coherence] Original physical address calculated: 0x%lx\n", original_phys_addr);
+    pr_info("[page_coherence] Page order: %d\n", payload->page_order);
     pfn_t original_pfn;
 
-    if (payload->page_order == 0) {
+    if (payload->page_order == 0 || payload->page_order == PMD_ORDER) {
         original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
     }
-    else if (payload->page_order == PMD_ORDER) {
-        original_pfn = pfn_to_pfn_t(original_phys_addr >> PMD_SHIFT);
-    } else {
+    else {
         pr_err("[page_coherence] Invalid page order: %d\n", payload->page_order);
         return -EINVAL;
     }
 
+    pr_info("[page_coherence] Original PFN calculated: 0x%lx\n", pfn_t_to_pfn(original_pfn));
     // find page replica from original pfn
     struct page *page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
 
@@ -551,6 +554,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
             put_page_replica_ref(page_replica);
             return ret;
         }
+        put_page_replica_ref(page_replica);
         goto map_pfn;
     }
     

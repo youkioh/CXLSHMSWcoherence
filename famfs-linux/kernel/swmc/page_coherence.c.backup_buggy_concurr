@@ -180,7 +180,16 @@ struct fault_handle {
     unsigned long original_pfn_val;
     unsigned long fh_flags;
 
-    struct completion *complete;
+    atomic_t local_pendings;
+    atomic_t local_pendings_retry;
+    atomic_t remote_pendings;
+    wait_queue_head_t waits;
+    wait_queue_head_t waits_retry;
+    unsigned int limit;
+    pid_t pid;
+
+    struct completion *local_complete;
+    struct completion *remote_complete;
 };
 
 static inline int __fault_hash_key(unsigned long pfn)
@@ -188,9 +197,9 @@ static inline int __fault_hash_key(unsigned long pfn)
     return pfn % FAULT_HASH_SIZE;
 }
 
-static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
+static struct fault_handle *__alloc_fault_handle(unsigned long pfn, pid_t pid, bool is_remote)
 {
-    pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx\n", __func__, pfn);
+    pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx, pid=%d, is_remote=%s\n", __func__, pfn, pid, is_remote ? "true" : "false");
 	struct fault_handle *fh = kmem_cache_alloc(__fault_handle_cache, GFP_ATOMIC);
 	int fk = __fault_hash_key(pfn);
 	
@@ -202,7 +211,17 @@ static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 	fh->original_pfn_val = pfn;
 	fh->fh_flags = 0;
 
-    fh->complete = NULL;
+	init_waitqueue_head(&fh->waits);
+	init_waitqueue_head(&fh->waits_retry);
+	
+	atomic_set(&fh->local_pendings, is_remote ? 0 : 1);
+	atomic_set(&fh->local_pendings_retry, 0);
+	atomic_set(&fh->remote_pendings, is_remote ? 1 : 0);
+
+	fh->limit = 0;
+	fh->pid = pid;
+	fh->local_complete = NULL;
+    fh->remote_complete = NULL;
 
 	hlist_add_head(&fh->list, &faults[fk]);
 	return fh;
@@ -248,11 +267,12 @@ static inline bool has_lower_priority(unsigned long fh_flags, bool is_write, lon
  * @vm_fault_flags: fault flags
  * @leader: output parameter indicating if this is the leader
  *
- * Returns: fault_handle pointer or NULL
+ * Returns: fault_handle pointer or NULL for retry
  */
 static struct fault_handle *__start_local_fault_handling(pid_t pid, 
 							 pfn_t original_pfn, 
-                             bool is_write)
+                             bool is_write,
+							 bool *leader)
 {
     pr_info("[Info]%s: Starting local fault handling for pid=%d, pfn=0x%lx, is_write=%s\n", __func__, pid, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false");
 	unsigned long flags;
@@ -262,8 +282,8 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
     original_pfn_val = pfn_t_to_pfn(original_pfn);
     int fk = __fault_hash_key(original_pfn_val);
 
+    DEFINE_WAIT(wait);
 	spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     /* Search for existing fault handle */
     hlist_for_each_entry(fh, &faults[fk], list) {
@@ -274,32 +294,64 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
     }
 
     if (found) {
-        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
-        DECLARE_COMPLETION_ONSTACK(complete);
-        fh->complete = &complete;
-
-        spin_unlock_irqrestore(&faults_lock[fk], flags);
-        wait_for_completion(&complete);
-        pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, pid);
-        spin_lock_irqsave(&faults_lock[fk], flags);
-        fh->fh_flags = is_write ? (fh->fh_flags | FH_STATE_WRITE) : 0;
-        spin_unlock_irqrestore(&faults_lock[fk], flags);
-        return fh;
+        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx (local_pendings=%d, local_pendings_retry=%d, remote_pendings=%d)\n",
+                __func__, original_pfn_val, atomic_read(&fh->local_pendings), atomic_read(&fh->local_pendings_retry), atomic_read(&fh->remote_pendings));
+        /* Check if same process (thread) and faults for the same reason*/
+        unsigned long fault_flags = (is_write ? FH_STATE_WRITE : 0);
+        if (fh->pid == pid && fault_flags == fh->fh_flags) {
+            /* Same process thread - join as follower */
+            if (fh->limit++ > FH_ACTION_MAX_FOLLOWER) {
+                goto wait_retry;
+            }
+            
+            atomic_inc(&fh->local_pendings);
+            pr_info("[Info]%s: PID=%d joins existing fault handle for pfn=0x%lx as follower (local_pendings=%d)\n",
+                    __func__, pid, original_pfn_val, atomic_read(&fh->local_pendings));
+            prepare_to_wait(&fh->waits, &wait, TASK_UNINTERRUPTIBLE);
+            spin_unlock_irqrestore(&faults_lock[fk], flags);
+            
+            io_schedule();
+            finish_wait(&fh->waits, &wait);
+            
+            *leader = false;
+            return fh;
+        } else {
+            goto wait_retry;
+        }
     }
 
     /* Allocate new fault handle */
-    fh = __alloc_fault_handle(original_pfn_val);
+    fh = __alloc_fault_handle(original_pfn_val, pid, false); // is_remote false
     if (!fh) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         return NULL;
     }
-    
+
     /* Update flags */
-    fh->fh_flags = is_write ? FH_STATE_WRITE : 0;
+    fh->fh_flags |= is_write ? FH_STATE_WRITE : 0;
 
     spin_unlock_irqrestore(&faults_lock[fk], flags);
 
+    *leader = true;
     return fh;
+
+wait_retry:
+    atomic_inc(&fh->local_pendings_retry);
+    pr_info("[Info]%s: PID=%d retries fault handling for pfn=0x%lx (local_pendings_retry=%d)\n",
+            __func__, pid, original_pfn_val, atomic_read(&fh->local_pendings_retry));
+    prepare_to_wait(&fh->waits_retry, &wait, TASK_UNINTERRUPTIBLE);
+    spin_unlock_irqrestore(&faults_lock[fk], flags);
+
+    io_schedule();
+    finish_wait(&fh->waits_retry, &wait);
+    pr_info("[Info]%s: PID=%d Waked up pfn=0x%lx\n",
+            __func__, pid, original_pfn_val);
+    if (atomic_dec_and_test(&fh->local_pendings_retry)) {
+        pr_info("[Info]%s: No more retry waiter in wait_retry context, free fault handler for pfn=0x%lx\n", __func__, original_pfn_val);
+        /* No more waiters, remove fault handle */
+        kmem_cache_free(__fault_handle_cache, fh);
+    }
+    return NULL;
 }
 
 /**
@@ -310,27 +362,80 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
  */
 static bool __finish_local_fault_handling(struct fault_handle *fh)
 {
-    pr_info("[Info]%s: Finishing local fault handling for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    pr_info("[Info]%s: Finishing local fault handling for pid=%d, pfn=0x%lx\n", __func__, fh->pid, fh->original_pfn_val);
     unsigned long flags;
+    bool last = false;
     bool need_redo = false;
     int fk = __fault_hash_key(fh->original_pfn_val);
 
     DECLARE_COMPLETION_ONSTACK(remote_complete);
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
-    /* If this local fault need to be redone, return true */
+    /* Priority:
+     * 1. Remote waiters waiting local_complete
+     * 2. Followers waiting in waits queue
+     * 3. Local waiters in waits_retry queue
+     */
+    
+    // if (fh->local_complete) {
+    //     if (fh->fh_flags & FH_STATE_NEED_REDO) {
+    //         pr_info("[Info]%s: PID=%d fault handling for pfn=0x%lx needs to be redone\n",
+    //                 __func__, fh->pid, fh->original_pfn_val);
+    //         need_redo = true;
+    //         fh->remote_complete = &remote_complete;
+    //     }
+    //     /* There is remote fault waiting */
+    //     complete(fh->local_complete);
+
+    //     if (need_redo) {
+    //         pr_info("[Info]%s: Local fault handling for pfn=0x%lx waits remote fault to redo\n",
+    //                 __func__, fh->original_pfn_val);
+    //         spin_unlock_irqrestore(&faults_lock[fk], flags);
+    //         /* Wait for remote fault handling to complete */
+    //         wait_for_completion(&remote_complete);
+    //         spin_lock_irqsave(&faults_lock[fk], flags);
+    //         fh->remote_complete = NULL;
+    //         spin_unlock_irqrestore(&faults_lock[fk], flags);
+    //         return true;
+    //     }
+    // }
     if (fh->fh_flags & FH_STATE_NEED_REDO) {
-        pr_info("[Info]%s: Fault handling for pfn=0x%lx needs to be redone\n",
-                __func__, fh->original_pfn_val);
-        need_redo = true;
+        pr_info("[Info]%s: PID=%d fault handling for pfn=0x%lx needs to be redone\n",
+                __func__, fh->pid, fh->original_pfn_val);
+        fh->fh_flags &= ~FH_STATE_NEED_REDO;
+        spin_unlock_irqrestore(&faults_lock[fk], flags);
+        return true;
     }
 
-    pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
-    hlist_del_init(&fh->list);
+    if (atomic_dec_return(&fh->local_pendings)) {
+        pr_info("[Info]%s: PID=%d waking up follower for pfn=0x%lx (local_pendings=%d)\n",
+                __func__, fh->pid, fh->original_pfn_val, atomic_read(&fh->local_pendings));
+        /* Wake up first follower in waits queue */
+        wake_up(&fh->waits);
+    } else {
+        /* Last followers */
+        if (atomic_read(&fh->remote_pendings) == 0) {
+            /* No remote fault waiting. Detach fault handle from hash list. */
+            pr_info("[Info]%s: No remote fault waiting, removing fault handle from hlist for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+            hlist_del(&fh->list);
+            last = true;
+        }
+    }
     spin_unlock_irqrestore(&faults_lock[fk], flags);
-    kmem_cache_free(__fault_handle_cache, fh);
-    return need_redo;
+
+    if (last) {
+        if (atomic_read(&fh->local_pendings_retry)) {
+            /* Wake up every waiters and let them rearrange to leader and followers and waiters */
+            pr_info("[Info]%s: Waking up all retry waiters for pfn=0x%lx\n, (local_pendings=%d, local_pendings_retry=%d, remote_pendings=%d)", __func__, fh->original_pfn_val, atomic_read(&fh->local_pendings), atomic_read(&fh->local_pendings_retry), atomic_read(&fh->remote_pendings));
+            wake_up_all(&fh->waits_retry);
+        } else {
+            pr_info("[Info]%s: No more retry waiter, free fault handler for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+            /* No more waiters, remove fault handle */
+            kmem_cache_free(__fault_handle_cache, fh);
+        }
+    }
+
+    return false;
 }
 
 /**
@@ -340,21 +445,20 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
  *
  * Returns: fault_handle pointer for ACK or NULL for NACK 
  */
-static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bool is_write, long remote_acked_fault_count, int remote_node_id, int local_node_id)
+static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bool is_write, long remote_acked_fault_count, bool *leader, int remote_node_id, int local_node_id)
 {
     pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
             __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
     unsigned long flags;
     struct fault_handle *fh;
     bool found = false;
+    DEFINE_WAIT(wait);
     unsigned long original_pfn_val;
     original_pfn_val = pfn_t_to_pfn(original_pfn);
-    
     int fk = __fault_hash_key(original_pfn_val);
-    
+
     
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     /* Search for existing fault handle */
     hlist_for_each_entry(fh, &faults[fk], list) {
@@ -364,31 +468,40 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
         }
     }
 
+    /* NACK does not wait local fault or remote fault to finish. */
     /* Conditions for NACK:
-     * 1. remote fault in-flight
-     * 2. Local fault in-flight with higher priority
-
+     *
+     * remote_pendings > 1, because every remote fault handling/waiting need to be serialized.
+     * or
+     * local_pendings > 1 and remote_pendings == 0, with lower priority, which are
+     *     L W | R R (write always has higher priority than read)
+     *     L W | R W (if L W has higher priority)
+     *
      * Condition for ACK:
-     * 1. No fault in-flight
-     * 2. Local fault in-flight with lower priority
-     * 3. Local fault in-flight with same priority (i.e. both fault are for I->S)
+     * no fault_handle found.
+     * or
+     * local_pendings > 1 and remote_pendings == 0, with higher priority, which are
+     *     (a) L R | R R -> Instant ACK response.
+     *     (b) L R | R W (L R is gonna be redone after remote fault handling) 
+     *     (c) L W | R W (if R W has higher priority and L W, L W is gonna be redone after remote fault handling) 
+     *     b, c need to wait in-flight local fault handling to complete, and process remote fault, and make local fault to be redone after little delay.
      */
 
     if (found) {
-        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx \n",
-                __func__, original_pfn_val);
-        if (fh->fh_flags & FH_STATE_REMOTE) {
-            /* Another remote fault is already being processed */
+        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx (local_pendings=%d, local_pendings_retry=%d, remote_pendings=%d)\n",
+                __func__, original_pfn_val, atomic_read(&fh->local_pendings), atomic_read(&fh->local_pendings_retry), atomic_read(&fh->remote_pendings));
+        if (atomic_read(&fh->remote_pendings) > 0) {
+            /* Another remote fault is already waiting */
             spin_unlock_irqrestore(&faults_lock[fk], flags);
             return NULL;
         }
-
         if (has_lower_priority(fh->fh_flags, is_write, remote_acked_fault_count, remote_node_id, local_node_id)) {
             spin_unlock_irqrestore(&faults_lock[fk], flags);
             return NULL;
         }
-
-        /* Local fault is being processed, but remote fault has higher or equal priority */
+        
+        atomic_inc(&fh->remote_pendings);
+        /* remote fault will be processed and will be responded with ACK */
         if (is_write) {
             fh->fh_flags |= FH_STATE_NEED_REDO;
         }
@@ -397,56 +510,168 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     }
 
     /* Allocate new fault handle for remote processing */
-    fh = __alloc_fault_handle(original_pfn_val); 
+    fh = __alloc_fault_handle(original_pfn_val, 0, true); // pid 0 for remote, is_remote true
     if (!fh) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         return NULL;
     }
 
     /* Update flags for remote handling */
-    fh->fh_flags = FH_STATE_REMOTE | (is_write ? FH_STATE_WRITE : 0);
+    fh->fh_flags |= FH_STATE_REMOTE;
+    fh->fh_flags |= is_write ? FH_STATE_WRITE : 0;
+    *leader = true;
 
     spin_unlock_irqrestore(&faults_lock[fk], flags);
 
     return fh;
 }
+// /**
+//  * __start_remote_fault_handling - Handle remote fault processing
+//  * @original_pfn: fault pfn
+//  * @is_write: true for write fault, false for read fault
+//  *
+//  * Returns: fault_handle pointer for ACK or NULL for NACK 
+//  */
+// static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bool is_write, long remote_acked_fault_count, bool *leader, int remote_node_id, int local_node_id)
+// {
+//     pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
+//             __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
+//     unsigned long flags;
+//     struct fault_handle *fh;
+//     bool found = false;
+//     DEFINE_WAIT(wait);
+//     unsigned long original_pfn_val;
+//     original_pfn_val = pfn_t_to_pfn(original_pfn);
+//     int fk = __fault_hash_key(original_pfn_val);
+//     DECLARE_COMPLETION_ONSTACK(local_complete);
+    
+//     spin_lock_irqsave(&faults_lock[fk], flags);
+
+//     /* Search for existing fault handle */
+//     hlist_for_each_entry(fh, &faults[fk], list) {
+//         if (fh->original_pfn_val == original_pfn_val) {
+//             found = true;
+//             break;
+//         }
+//     }
+
+//     /* NACK does not wait local fault or remote fault to finish. */
+//     /* Conditions for NACK:
+//      *
+//      * remote_pendings > 1, because every remote fault handling/waiting need to be serialized.
+//      * or
+//      * local_pendings > 1 and remote_pendings == 0, with lower priority, which are
+//      *     L W | R R (write always has higher priority than read)
+//      *     L W | R W (if L W has higher priority)
+//      *
+//      * Condition for ACK:
+//      * no fault_handle found.
+//      * or
+//      * local_pendings > 1 and remote_pendings == 0, with higher priority, which are
+//      *     (a) L R | R R -> Instant ACK response.
+//      *     (b) L R | R W (L R is gonna be redone after remote fault handling) 
+//      *     (c) L W | R W (if R W has higher priority and L W, L W is gonna be redone after remote fault handling) 
+//      *     b, c need to wait in-flight local fault handling to complete, and process remote fault, and make local fault to be redone after little delay.
+//      */
+
+//     if (found) {
+//         pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx (local_pendings=%d, local_pendings_retry=%d, remote_pendings=%d)\n",
+//                 __func__, original_pfn_val, atomic_read(&fh->local_pendings), atomic_read(&fh->local_pendings_retry), atomic_read(&fh->remote_pendings));
+//         if (atomic_read(&fh->remote_pendings) > 0) {
+//             /* Another remote fault is already waiting */
+//             spin_unlock_irqrestore(&faults_lock[fk], flags);
+//             return NULL;
+//         }
+//         if (has_lower_priority(fh->fh_flags, is_write, remote_acked_fault_count, remote_node_id, local_node_id)) {
+//             spin_unlock_irqrestore(&faults_lock[fk], flags);
+//             return NULL;
+//         }
+        
+//         atomic_inc(&fh->remote_pendings);
+//         /* remote fault will be processed and will be responded with ACK */
+//         if (is_write) {
+//             fh->fh_flags |= FH_STATE_NEED_REDO;
+//             fh->local_complete = &local_complete;
+//         }
+//         spin_unlock_irqrestore(&faults_lock[fk], flags);
+//         if (fh->local_complete) {
+//             pr_info("[Info]%s: Remote fault handling for pfn=0x%lx waits local fault to complete\n",
+//                     __func__, original_pfn_val);
+//             /* Wait for local fault handling to complete */
+//             wait_for_completion(&local_complete);
+//             spin_lock_irqsave(&faults_lock[fk], flags);
+//             fh->local_complete = NULL;
+//             spin_unlock_irqrestore(&faults_lock[fk], flags);
+//         }
+//         return fh;
+//     }
+
+//     /* Allocate new fault handle for remote processing */
+//     fh = __alloc_fault_handle(original_pfn_val, 0, true); // pid 0 for remote, is_remote true
+//     if (!fh) {
+//         spin_unlock_irqrestore(&faults_lock[fk], flags);
+//         return NULL;
+//     }
+
+//     /* Update flags for remote handling */
+//     fh->fh_flags |= FH_STATE_REMOTE;
+//     fh->fh_flags |= is_write ? FH_STATE_WRITE : 0;
+//     *leader = true;
+
+//     spin_unlock_irqrestore(&faults_lock[fk], flags);
+
+//     return fh;
+// }
 
 /**
  * __finish_remote_fault_handling - Complete remote fault processing
  * @fh: fault handle
  *
- * Returns: true if fault handle is freed.
+ * Returns: true if this was the last reference and handle was freed
  */
-static bool __finish_remote_fault_handling(struct fault_handle *fh)
+static bool __finish_remote_fault_handling(struct fault_handle *fh, bool *leader)
 {
-    pr_info("[Info]%s: Finishing remote fault handling for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    pr_info("[Info]%s: Finishing remote fault handling for pfn=0x%lx, leader=%s\n", __func__, fh->original_pfn_val, *leader ? "true" : "false");
     unsigned long flags;
+    bool last = false;
     int fk = __fault_hash_key(fh->original_pfn_val);
 
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
-    if (fh->complete) {
-        pr_info("[Info]%s: There is a local fault waiting for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-        complete(fh->complete);
-        fh->complete = NULL;
-        spin_unlock_irqrestore(&faults_lock[fk], flags);
-        return false;
+    if (atomic_dec_and_test(&fh->remote_pendings)) {
+        pr_info("[Info]%s: Last remnote reference for pfn=0x%lx\n, leader: %s.", __func__, fh->original_pfn_val, *leader ? "true" : "false");
+        /* Last remote reference */
+        if (fh->remote_complete) {
+            pr_info("[Info]%s: Completing remote_complete for pfn=0x%lx\n, leader: %s.", __func__, fh->original_pfn_val, *leader ? "true" : "false");
+            /* local fault is waiting remote_complete to redo fault */
+            fh->fh_flags &= ~FH_STATE_NEED_REDO;
+            complete(fh->remote_complete);
+        } 
+
+        if (*leader) {
+            /* Remote leader is the one who allocates fault handle. */
+            if (atomic_read(&fh->local_pendings) > 0) {
+                /* There are local fault need to be redone. */
+            } else if (atomic_read(&fh->local_pendings_retry)) {
+                /* Local fault is waiting */
+                hlist_del(&fh->list);
+                wake_up_all(&fh->waits_retry);
+            } else {
+                /* No local fault waiting, */
+                pr_info("[Info]%s: No local fault waiting, removing fault handle from hlist for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+                hlist_del(&fh->list);
+                last = true;
+            }
+        }
     }
 
-    if (fh->fh_flags & FH_STATE_REMOTE) {
-        pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-        hlist_del_init(&fh->list);
-        spin_unlock_irqrestore(&faults_lock[fk], flags);
-    
-        kmem_cache_free(__fault_handle_cache, fh);
-        return true;
-    }
-
-    pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
 
-    return false;
+    if (last) {
+        kmem_cache_free(__fault_handle_cache, fh);
+    }
+
+    return last;
 }
 
 // Fetch/Invalidate message handling
@@ -481,37 +706,68 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
 
     // find fault handle for remote fault handling
     struct fault_handle *fh;
-    struct fault_handle *_tmp_fh;
-    bool exist = false;
+    bool leader = false;
     long remote_acked_fault_count = payload->acked_fault_count;
+    bool acked = false;
     unsigned long flags;
     bool is_write = (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE);
-    struct page *page_replica;
-    int fk;
 
-    fh = __start_remote_fault_handling(original_pfn, is_write, remote_acked_fault_count, msg->header.from_nid, msg->header.to_nid);
+    fh = __start_remote_fault_handling(original_pfn, is_write, remote_acked_fault_count, &leader, msg->header.from_nid, msg->header.to_nid);
     if (!fh) {
         pr_info("[Info]%s: NACK remote fault handling\n", __func__);
-        ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_NACK : SWMC_KMSG_TYPE_FETCH_NACK), msg->header.ws_id, msg->header.from_nid, payload);
+        ret = swmc_kmsg_unicast((msg->header.type == SWMC_KMSG_TYPE_FETCH ? SWMC_KMSG_TYPE_FETCH_NACK : SWMC_KMSG_TYPE_INVALIDATE_NACK), msg->header.ws_id, msg->header.from_nid, payload);
         return ret;
     }
 
-    pr_info("[Info]%s: ACK remote fault handling\n", __func__);
+    if (fh->fh_flags & FH_STATE_NEED_REDO) {
+        // DECLARE_COMPLETION_ONSTACK(local_complete);
+        // int fk = __fault_hash_key(fh->original_pfn_val);
+
+        // spin_lock_irqsave(&faults_lock[fk], flags);
+        // fh->local_complete = &local_complete;
+        // spin_unlock_irqrestore(&faults_lock[fk], flags);
+
+        pr_info("[Info]%s: Send back acknowledgement message for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        WARN_ON(msg->header.type == SWMC_KMSG_TYPE_FETCH);
+        ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_INVALIDATE_ACK, msg->header.ws_id, msg->header.from_nid, payload);
+        acked = true;
+        
+        // pr_info("[Info]%s: Remote fault handling for pfn=0x%lx waits local fault to complete\n",
+        //     __func__, fh->original_pfn_val);
+        // /* Wait for local fault handling to complete */
+        // wait_for_completion(&local_complete);
+
+        // spin_lock_irqsave(&faults_lock[fk], flags);
+        // fh->local_complete = NULL;
+        // spin_unlock_irqrestore(&faults_lock[fk], flags);
+        __finish_remote_fault_handling(fh, &leader);
+        return 0;
+    }
+        
+    if (!leader) {
+        /* This means that remote fault is read, and in-flight local fault is for read. */
+        pr_info("[Info]%s: Remote fault handling for pfn=0x%lx returns immediately\n", __func__, fh->original_pfn_val);
+        WARN_ON(msg->header.type == SWMC_KMSG_TYPE_INVALIDATE);
+        ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_FETCH_ACK, msg->header.ws_id, msg->header.from_nid, payload);
+        acked = true;
+
+        __finish_remote_fault_handling(fh, &leader);
+        return 0;
+    }
 
     // find page replica from original pfn
-    page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
+    struct page *page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
 
     if (!page_replica) { // I -> I
         pr_info("[Info]%s: No replica page found (I->I transition)\n", __func__);
-    } else if (!is_write) {
+    } else if (msg->header.type == SWMC_KMSG_TYPE_FETCH) {
         // M -> S, S -> S
         pr_info("[Info]%s: Page replica found (M->S or S->S transition)\n", __func__);
 
         /* For M->S transition: remove write permissions from all mappings
-         * For S->S transition: already read-only, so writeback will check if dirty
-         * In both cases, writeback_page_replica() will handle it.
-         */
-        ret = writeback_page_replica(page_replica);
+            * For S->S transition: already read-only, but ensure consistency
+            */
+        int ret = writeback_page_replica(page_replica);
         if (ret == REPLICA_SUCCESS) {
             pr_info("[Info]%s: M->S transition, successfully wrote back page relica.\n", __func__);
         } else if (ret == REPLICA_SHARED_STATE) {
@@ -521,40 +777,30 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         }
         /* Release reference obtained from get_page_replica_with_ref() */
         put_page_replica_ref(page_replica);
-    } else {
+    } else if (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE) {
         // S -> I (M -> I is not allowed)
         pr_info("[Info]%s: Page replica found (S->I transition)\n", __func__);
 
         /* For M->I or S->I transitions, clean up the page replica
-         * This do not includes flushing dirty data back to original.
-         * Just free the replica.
-         * So M->I transition is not allowed.
-         */
-
-        // Just make page_replica to invalid
-        make_page_replica_invalid(page_replica);
+        * This do not includes flushing dirty data back to original.
+        * Just free the replica.
+        * So M->I transition is not allowed.
+        */
         put_page_replica_ref(page_replica);
-    }
-
-    ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);
-
-    fk = __fault_hash_key(pfn_t_to_pfn(original_pfn));
-
-    spin_lock_irqsave(&faults_lock[fk], flags);
-    hlist_for_each_entry(_tmp_fh, &faults[fk], list) {
-        if (_tmp_fh->original_pfn_val == pfn_t_to_pfn(original_pfn)) {
-            exist = true;
-            break;
+        int invalidate_ret = destroy_page_replica(page_replica);
+        if (invalidate_ret) {
+            pr_info("[Info]%s: Failed to invalidate page replica: %d\n", __func__, invalidate_ret);
+        } else {
+            pr_info("[Info]%s: Successfully invalidated page replica\n", __func__);
         }
     }
-    spin_unlock_irqrestore(&faults_lock[fk], flags);
 
-    if(!exist) {
-        pr_info("[Info]%s: Fault handle already deleted for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
-        return 0;
+    // send back fetch_ack_message using payload of original kmsg
+    if (!acked) {
+        ret = swmc_kmsg_unicast((msg->header.type == SWMC_KMSG_TYPE_FETCH ? SWMC_KMSG_TYPE_FETCH_ACK : SWMC_KMSG_TYPE_INVALIDATE_ACK), msg->header.ws_id, msg->header.from_nid, payload);
     }
 
-    __finish_remote_fault_handling(fh);
+    __finish_remote_fault_handling(fh, &leader);
 
     return 0;
 }
@@ -596,6 +842,227 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
 
     return 0;
 }
+
+// // Fetch message handling
+// // M-> S, S -> S, I -> I
+// static int swmc_kmsg_handle_fetch(struct swmc_kmsg_message *msg)
+// {
+//     int ret = 0;
+//     struct payload_data *payload = &msg->payload;
+//     // Validate message
+//     if (!msg || msg->header.type != SWMC_KMSG_TYPE_FETCH) {
+//         pr_err("[Info]%s: Invalid fetch message\n", __func__);
+//         return -EINVAL;
+//     }
+
+//     pr_info("[Info]%s: Handling fetch message for offset 0x%lx\n", __func__, payload->cxl_hdm_offset);
+
+//     // calculate original pfn from payload->cxl_hdm_offset
+//     unsigned long original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
+//     pr_info("[Info]%s: Original physical address calculated: 0x%lx\n", __func__, original_phys_addr);
+//     pr_info("[Info]%s: Page order: %d\n", __func__, payload->page_order);
+//     pfn_t original_pfn;
+
+//     if (payload->page_order == 0 || payload->page_order == PMD_ORDER) {
+//         original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
+//     }
+//     else {
+//         pr_err("[Error]%s: Invalid page order: %d\n", __func__, payload->page_order);
+//         return -EINVAL;
+//     }
+//     pr_info("[Info]%s: Original PFN calculated: 0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+
+//     // find fault handle for remote fault handling
+//     struct fault_handle *fh;
+//     bool leader = false;
+//     long remote_acked_fault_count = payload->acked_fault_count;
+
+//     fh = __start_remote_fault_handling(original_pfn, false, remote_acked_fault_count, &leader, msg->header.from_nid, msg->header.to_nid);
+//     if (!fh) {
+//         pr_info("[Info]%s: NACK remote fault handling\n", __func__);
+//         ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_FETCH_NACK, msg->header.ws_id, msg->header.from_nid, payload);
+//         return ret;
+//     }
+
+//     // find page replica from original pfn
+//     struct page *page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
+
+//     if (!page_replica) { // I -> I
+//         pr_info("[Info]%s: No replica page found (I->I transition)\n", __func__);
+//     } else { // M -> S, S -> S
+//         pr_info("[Info]%s: Page replica found (M->S or S->S transition)\n", __func__);
+
+//         /* For M->S transition: remove write permissions from all mappings
+//          * For S->S transition: already read-only, but ensure consistency
+//          */
+//         int ret = writeback_page_replica(page_replica);
+//         if (ret == REPLICA_SUCCESS) {
+//             pr_info("[Info]%s: M->S transition\n", __func__);
+//         } else if (ret == REPLICA_SHARED_STATE) {
+//             pr_info("[Info]%s: S->S transition, no writeback needed\n", __func__);
+//         } else {
+//             pr_info("[Info]%s: Failed to write-protect page replica: \n", __func__);
+//         }
+        
+//         /* Release reference obtained from get_page_replica_with_ref() */
+//         put_page_replica_ref(page_replica);
+//     }
+//     // send back fetch_ack_message using payload of original kmsg
+//     ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_FETCH_ACK, msg->header.ws_id, msg->header.from_nid, payload);
+
+//     __finish_remote_fault_handling(fh, &leader);
+
+//     return 0;
+// }
+
+// // Fetch_ack message handling
+// static int swmc_kmsg_handle_fetch_ack(struct swmc_kmsg_message *msg)
+// {
+//     // check if the message is valid
+//     if (!msg || (msg->header.type != SWMC_KMSG_TYPE_FETCH_ACK && msg->header.type != SWMC_KMSG_TYPE_FETCH_NACK)) {
+//         pr_err("[Err]%s: Invalid fetch_ack message\n", __func__);
+//         return -EINVAL;
+//     }
+
+//     pr_info("[Info]%s: Handling fetch_ack message for offset 0x%lx\n", __func__, msg->payload.cxl_hdm_offset);
+
+//     // find the wait station by ID
+//     struct wait_station *ws = wait_station(msg->header.ws_id);
+//     if (!ws) {
+//         pr_err("[Err]%s: Invalid wait station ID: %d\n", __func__, msg->header.ws_id);
+//         return -EINVAL;
+//     }
+
+//     if(msg->header.type == SWMC_KMSG_TYPE_FETCH_NACK) {
+//         pr_info("[Info]%s: Received FETCH_NACK for wait station %d\n", __func__, msg->header.ws_id);
+//         ws->private = (void *)-1; // Indicate NACK received
+//     }
+
+//     // Decrease pending count atomically
+//     if (atomic_dec_and_test(&ws->pendings_count)) {
+//         // All fetch ACKs received, wake up the wait station
+//         pr_info("[Info]%s: All fetch ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
+//         atomic64_inc(&__local_acked_fault_count); // Increment local ACK count
+//         complete(&ws->pendings);
+//     } else {
+//         pr_info("[Info]%s: Fetch ACK/NACK received, pending count: %d\n", __func__,
+//                 atomic_read(&ws->pendings_count));
+//     }
+
+//     return 0;
+// }
+
+// // Invalidate message handling
+// // S -> I, I -> I (M -> I is violated)
+// static int swmc_kmsg_handle_invalidate(struct swmc_kmsg_message *msg)
+// {
+//     // Validate message
+//     if (!msg || msg->header.type != SWMC_KMSG_TYPE_INVALIDATE) {
+//         pr_err("[Err]%s: Invalid invalidate message\n", __func__);
+//         return -EINVAL;
+//     }
+
+//     struct payload_data *payload = &msg->payload;
+//     int ret = 0;
+
+//     pr_info("[Info]%s: Handling invalidate message for offset 0x%lx\n", __func__, payload->cxl_hdm_offset);
+    
+//     // calculate original pfn from payload->cxl_hdm_offset
+//     // phys_addr_t original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
+//     unsigned long original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
+//     pr_info("[Info]%s: Original physical address calculated: 0x%lx\n", __func__, original_phys_addr);
+//     pr_info("[Info]%s: Page order: %d\n", __func__, payload->page_order);
+//     pfn_t original_pfn;
+
+//     if (payload->page_order == 0 || payload->page_order == PMD_ORDER) {
+//         original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
+//     }
+//     else {
+//         pr_err("[Err]%s: Invalid page order: %d\n", __func__, payload->page_order);
+//         return -EINVAL;
+//     }
+
+//     pr_info("[Info]%s: Original PFN calculated: 0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+
+//     // find fault handle for remote fault handling
+//     struct fault_handle *fh;
+//     bool leader = false;
+//     long remote_acked_fault_count = payload->acked_fault_count;
+
+//     fh = __start_remote_fault_handling(original_pfn, true, remote_acked_fault_count, &leader, msg->header.from_nid, msg->header.to_nid);
+//     if (!fh) {
+//         pr_info("[Info]%s: NACK remote fault handling\n", __func__);
+//         ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_INVALIDATE_NACK, msg->header.ws_id, msg->header.from_nid, payload);
+//         return ret;
+//     }
+
+//     // find page replica from original pfn
+//     struct page *page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
+
+//     if (!page_replica) { // I -> I
+//         pr_info("[Info]%s: No page replica found (I->I transition)\n", __func__);
+//     }
+//     else { // S -> I (M -> I is not allowed)
+//         pr_info("[Info]%s: Page replica found (S->I transition)\n", __func__);
+
+//         /* For M->I or S->I transitions, clean up the page replica
+//          * This do not includes flushing dirty data back to original.
+//          * Just free the replica.
+//          * So M->I transition is not allowed.
+//          */
+//         put_page_replica_ref(page_replica);
+//         int invalidate_ret = destroy_page_replica(page_replica);
+//         if (invalidate_ret) {
+//             pr_info("[Info]%s: Failed to flush page replica: %d\n", __func__, invalidate_ret);
+//         } else {
+//             pr_info("[Info]%s: Successfully flushed page replica\n", __func__);
+//         }
+//     }
+
+//     // send back invalidate_ack_message using payload of original kmsg
+//     ret = swmc_kmsg_unicast(SWMC_KMSG_TYPE_INVALIDATE_ACK, msg->header.ws_id, msg->header.from_nid, payload);
+
+//     __finish_remote_fault_handling(fh, &leader);
+
+//     return 0;
+// }
+
+// // Invalidate_ack message handling
+// static int swmc_kmsg_handle_invalidate_ack(struct swmc_kmsg_message *msg)
+// {
+//     // check if the message is valid
+//     if (!msg || (msg->header.type != SWMC_KMSG_TYPE_INVALIDATE_ACK && msg->header.type != SWMC_KMSG_TYPE_INVALIDATE_NACK)) {
+//         pr_err("[Err]%s: Invalid invalidate_ack message\n", __func__);
+//         return -EINVAL;
+//     }
+
+//     pr_info("[Info]%s: Handling invalidate_ack message for offset 0x%lx\n", __func__, msg->payload.cxl_hdm_offset);
+
+//     // find the wait station by ID
+//     struct wait_station *ws = wait_station(msg->header.ws_id);
+//     if (!ws) {
+//         pr_err("[Err]%s: Invalid wait station ID: %d\n", __func__, msg->header.ws_id);
+//         return -EINVAL;
+//     }
+
+//     if (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE_NACK) {
+//         pr_info("[Info]%s: Received INVALIDATE_NACK for wait station %d\n", __func__, msg->header.ws_id);
+//         ws->private = (void *)-1; // Indicate NACK received
+//     }
+
+//     // Decrease pending count atomically
+//     if (atomic_dec_and_test(&ws->pendings_count)) {
+//         // All invalidate ACKs received, wake up the wait station
+//         pr_info("[Info]%s: All invalidate ACKs received for wait station %d\n", __func__, msg->header.ws_id);
+//         atomic64_inc(&__local_acked_fault_count); // Increment remote ACK count
+//         complete(&ws->pendings);
+//     } else {
+//         pr_info("[Info]%s: Invalidate ACK received, pending count: %d\n", __func__,
+//                 atomic_read(&ws->pendings_count));
+//     }
+
+//     return 0;
+// }
 
 // Error message handling
 static int swmc_kmsg_handle_error(struct swmc_kmsg_message *msg)
@@ -681,7 +1148,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     int node_count;
     unsigned long cxl_hdm_offset;
     bool need_invalidate;
+
     struct fault_handle *fh;
+    bool leader;
     unsigned long flags;
     bool is_currently_writable;
     int fk;
@@ -745,25 +1214,34 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return -EINVAL;
     }
 
-redo:
+    leader = false;
 
-    fh = __start_local_fault_handling(current->pid, original_pfn, write);
+retry:
+    fh = __start_local_fault_handling(current->pid, original_pfn, write, &leader);
     if (!fh) {
-        pr_err("[Err]%s: Failed to allocate new fault handle\n", __func__);
-        return -ENOMEM;
+        pr_info("[Info]%s: We should retry local fault handling\n", __func__);
+        leader = false;
+        goto retry;
     }
+
+redo:
 
     /* =======================================================================
      * STEP 1: Check if replica already exists for this original PFN
      * ======================================================================= */
     
     page_replica = get_page_replica_with_ref(original_pfn, order);
-
-    if (page_replica && !is_page_replica_invalid(page_replica)) {
+    
+    if (!leader && page_replica) {
+        put_page_replica_ref(page_replica);
+        goto map_pfn;
+    }
+        
+    if (page_replica) {
         /* Replica exists - handle different fault scenarios */
         atomic64_inc(&page_coherence_replica_found_count);
         pr_info("[Info]%s: Replica found: %p\n", __func__, page_replica);
-            
+        
         if (!write) {
             /* READ FAULT on existing replica:
              * Simply map the existing replica without any protocol messages.
@@ -827,8 +1305,14 @@ redo:
              */
             pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
             put_page_replica_ref(page_replica);
-            __finish_local_fault_handling(fh);
-            goto redo;
+            if (__finish_local_fault_handling(fh)) {
+                /* If we need to redo, go back to redo label */
+                pr_info("[Info]%s: We should redo local fault handling\n", __func__);
+                fetch_page_replica(page_replica, order, kaddr);
+                need_invalidate = false;
+                goto redo;
+            }
+            goto retry;
         } else if (ret) {
             put_page_replica_ref(page_replica);
             return ret;
@@ -865,12 +1349,17 @@ redo:
     ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, node_count, 
                                    &payload, cxl_hdm_offset);
     if (ret == -EAGAIN) {
-        /* Fetch was NACKed - likely due to concurrent write fault elsewhere
+        /* Invalidate was NACKed - likely due to concurrent write fault elsewhere
             * Retry entire fault handling
             */
         pr_info("[Info]%s: NACKed - retrying fault handling\n", __func__);
-        __finish_local_fault_handling(fh);
-        goto redo;
+        if (__finish_local_fault_handling(fh)) {
+            /* If we need to redo, go back to redo label */
+            pr_info("[Info]%s: We should redo local fault handling\n", __func__);
+            need_invalidate = false;
+            goto redo;
+        }
+        goto retry;
     } else if (ret) {
         return ret;
     }
@@ -889,21 +1378,20 @@ redo:
              * Retry entire fault handling
              */
             pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
-            __finish_local_fault_handling(fh);
-            goto redo;
+            if (__finish_local_fault_handling(fh)) {
+                /* If we need to redo, go back to redo label */
+                pr_info("[Info]%s: We should redo local fault handling\n", __func__);
+                need_invalidate = false;
+                goto redo;
+            }
+            goto retry;
         } else if (ret) {
             return ret;
         }
     }
 
     /* Create replica page using page_replication.c API */
-    if (page_replica) {
-        fetch_page_replica(page_replica, order, kaddr);
-    } else {
-        page_replica = create_page_replica(order, original_pfn, kaddr);
-    }
-
-
+    page_replica = create_page_replica(order, original_pfn, kaddr);
     if (IS_ERR(page_replica)) {
         ret = PTR_ERR(page_replica);
         pr_info("[Info]%s: Failed to create page replica: %d\n", __func__, ret);
@@ -937,8 +1425,16 @@ map_pfn:
     if (__finish_local_fault_handling(fh)) {
         /* If we need to redo, go back to redo label */
         pr_info("[Info]%s: We should redo local fault handling\n", __func__);
+        fetch_page_replica(page_replica, order, kaddr);
+        need_invalidate = false;
         goto redo;
     }
+    // __finish_local_fault_handling(fh);
+    // if (need_redo) {
+    //     pr_info("[Info]%s: Local fault handling needs to be redone\n", __func__);
+    //     leader = true;
+    //     goto redo;
+    // }
     return 0;
 }
 

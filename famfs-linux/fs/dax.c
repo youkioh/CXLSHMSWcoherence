@@ -916,26 +916,26 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		unsigned long flags)
 {
 	struct folio* folio = pfn_folio(pfn_t_to_pfn(pfn));
-	pr_info("[%s] before dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
-		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+	// pr_info("[%s] before dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
+	// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	void *new_entry = dax_make_entry(pfn, flags);
 	bool write = iter->flags & IOMAP_WRITE;
 	bool dirty = write && !dax_fault_is_synchronous(iter, vmf->vma);
 	bool shared = iter->iomap.flags & IOMAP_F_SHARED;
 
-	pr_info("[%s] after dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
-		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+	// pr_info("[%s] after dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
+	// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 
-	pr_info("[%s] shared: %d, dax_is_zero_entry: %d, dax_is_empty_entry: %d, flags: 0x%lx\n",
-		__func__, shared, dax_is_zero_entry(entry),
-		dax_is_empty_entry(entry), flags);
+	// pr_info("[%s] shared: %d, dax_is_zero_entry: %d, dax_is_empty_entry: %d, flags: 0x%lx\n",
+	// 	__func__, shared, dax_is_zero_entry(entry),
+	// 	dax_is_empty_entry(entry), flags);
 	if (dirty)
 		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 
 	if (shared || (dax_is_zero_entry(entry) && !(flags & DAX_ZERO_PAGE))) {
-		pr_info("[%s] unmapping entry of pfn: %lu, nr_pages_mapped=%u\n",
-			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+		// pr_info("[%s] unmapping entry of pfn: %lu, nr_pages_mapped=%u\n",
+		// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		unsigned long index = xas->xa_index;
 		/* we are replacing a zero page with block mapping */
 		if (dax_is_pmd_entry(entry))
@@ -945,11 +945,11 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 			unmap_mapping_pages(mapping, index, 1, false);
 	}
 
-	pr_info("[%s] before xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
-		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+	// pr_info("[%s] before xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
+	// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	xas_reset(xas);
-	pr_info("[%s] after xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
-		__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+	// pr_info("[%s] after xas_reset of pfn: %lu, nr_pages_mapped=%u\n",
+	// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	xas_lock_irq(xas);
 	if (shared || dax_is_zero_entry(entry) || dax_is_empty_entry(entry)) {
 		void *old;
@@ -957,8 +957,8 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		dax_disassociate_entry(entry, mapping, false);
 		dax_associate_entry(new_entry, mapping, vmf->vma, vmf->address,
 				shared);
-		pr_info("[%s] after dax_associate_entry of pfn: %lu, nr_pages_mapped=%u\n",
-			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+		// pr_info("[%s] after dax_associate_entry of pfn: %lu, nr_pages_mapped=%u\n",
+		// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		/*
 		 * Only swap our new entry into the page cache if the current
 		 * entry is a zero page or an empty entry.  If a normal PTE or
@@ -968,8 +968,8 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		 * tree and dirty it if necessary.
 		 */
 		old = dax_lock_entry(xas, new_entry);
-		pr_info("[%s] after dax_lock_entry of pfn: %lu, nr_pages_mapped=%u\n",
-			__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
+		// pr_info("[%s] after dax_lock_entry of pfn: %lu, nr_pages_mapped=%u\n",
+		// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 		WARN_ON_ONCE(old != xa_mk_value(xa_to_value(entry) |
 					DAX_LOCKED));
 		entry = new_entry;
@@ -1760,27 +1760,28 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
 	// if (ret == VM_FAULT_NOPAGE) return VM_FAULT_NOPAGE;
 
-    if (ret) {
-		pr_info("[%s] page_coherence_fault returned with error %d for pfn %lu at addr 0x%lx\n",
-			__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
-		if (ret == -EAGAIN) {
-			// sungsu: retry the fault
-			pr_info("[dax_fault_iter] retrying the fault for pfn %lu at addr 0x%lx\n",
-				pfn_t_to_pfn(pfn), vmf->address);
-			// return VM_FAULT_RETRY;
-		}
-		if (ret == -ENOMEM) {
-			// sungsu: return VM_FAULT_OOM
-			pr_info("[dax_fault_iter] returning VM_FAULT_OOM for pfn %lu at addr 0x%lx\n",
-				pfn_t_to_pfn(pfn), vmf->address);
-			// return VM_FAULT_OOM;
-		}
-		if (ret < 0) {
-			pr_info("[%s] other error %d for pfn %lu at addr 0x%lx\n",
-				__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
-			// return dax_fault_return(ret);
-		}
-	}
+	if (ret == VM_FAULT_RETRY) return ret;
+    // if (ret) {
+	// 	pr_info("[%s] page_coherence_fault returned with error %d for pfn %lu at addr 0x%lx\n",
+	// 		__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
+	// 	if (ret == -EAGAIN) {
+	// 		// sungsu: retry the fault
+	// 		pr_info("[dax_fault_iter] retrying the fault for pfn %lu at addr 0x%lx\n",
+	// 			pfn_t_to_pfn(pfn), vmf->address);
+	// 		// return VM_FAULT_RETRY;
+	// 	}
+	// 	if (ret == -ENOMEM) {
+	// 		// sungsu: return VM_FAULT_OOM
+	// 		pr_info("[dax_fault_iter] returning VM_FAULT_OOM for pfn %lu at addr 0x%lx\n",
+	// 			pfn_t_to_pfn(pfn), vmf->address);
+	// 		// return VM_FAULT_OOM;
+	// 	}
+	// 	if (ret < 0) {
+	// 		pr_info("[%s] other error %d for pfn %lu at addr 0x%lx\n",
+	// 			__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
+	// 		// return dax_fault_return(ret);
+	// 	}
+	// }
 #endif // CONFIG_PAGE_COHERENCE
 
 	// sungsu: print the nr_pages_mapped of folio
@@ -1838,9 +1839,9 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		}
 		i_mmap_unlock_read(temp_mapping);
 
-		print_page_info(&folio->page, "dax_fault_iter");
-		print_page_info(&folio->page + 1, "dax_fatul_iter + 1");
-		print_page_info(&folio->page + 2, "dax_fault_iter + 2");
+		// print_page_info(&folio->page, "dax_fault_iter");
+		// print_page_info(&folio->page + 1, "dax_fatul_iter + 1");
+		// print_page_info(&folio->page + 2, "dax_fault_iter + 2");
 		return ret;
 	}
 

@@ -18,8 +18,10 @@
 enum swmc_kmsg_type {
     SWMC_KMSG_TYPE_FETCH = 0,
     SWMC_KMSG_TYPE_FETCH_ACK,
+    SWMC_KMSG_TYPE_FETCH_NACK,
     SWMC_KMSG_TYPE_INVALIDATE,
     SWMC_KMSG_TYPE_INVALIDATE_ACK,
+    SWMC_KMSG_TYPE_INVALIDATE_NACK,
     SWMC_KMSG_TYPE_ERROR,
     SWMC_KMSG_TYPE_MAX
 };
@@ -35,6 +37,7 @@ struct swmc_kmsg_hdr {
 struct payload_data {
     unsigned long cxl_hdm_offset;
     int page_order; // 0 for PAGE_SIZE, PMD_ORDER for PMD_SIZE
+    long acked_fault_count; // number of ACKed faults at the sender when this message was sent
 } __attribute__((packed));
 
 /* CXL message structure */

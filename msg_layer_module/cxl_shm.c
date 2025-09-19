@@ -484,6 +484,8 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
                 pr_err("%s: Received NULL message from node %d\n", MODULE_NAME, from_nid);
                 continue;
             }
+            pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
+                    MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
             
             /* Additional validation for message header */
             if (msg->header.type < 0 || msg->header.type >= SWMC_KMSG_TYPE_MAX) {

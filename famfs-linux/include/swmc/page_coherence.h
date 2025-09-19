@@ -70,8 +70,11 @@ bool check_page_replica_dirty(struct page *page_replica);
 struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *src_kaddr);
 int destroy_page_replica(struct page *page_replica);
 int writeback_page_replica(struct page *page_replica);
+int fetch_page_replica(struct page *page_replica, unsigned int order, void *src_kaddr);
 struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order);
 void put_page_replica_ref(struct page *page_replica);
+int make_page_replica_invalid(struct page *page_replica);
+bool is_page_replica_invalid(struct page *page_replica);
 int __flush_page_replica(struct page *page_replica);
 int make_page_replica_dirty(struct page *page_replica);
 

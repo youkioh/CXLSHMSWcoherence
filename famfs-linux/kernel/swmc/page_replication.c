@@ -143,6 +143,7 @@ struct page_replica_meta {
     refcount_t refcount;
     bool on_lru;
     bool dirty;
+    bool invalidated;
 };
 
 /* Helper to get meta with reference under lock */
@@ -175,6 +176,45 @@ static void put_page_replica_meta(struct page_replica_meta *meta)
         kfree(meta);
     }
 }
+
+int make_page_replica_invalid(struct page *page_replica)
+{
+    struct address_space *mapping = page_replica->mapping;
+    unsigned long index = page_replica->index;
+    struct page_replica_meta *meta = get_page_replica_meta(page_replica);
+    unsigned int order;
+
+    if (!meta) {
+        pr_info("[%s] No meta found for page=%p, cannot mark invalidated\n", __func__, page_replica);
+        return -ENOENT;
+    }
+
+    unmap_mapping_pages(mapping, index, 1 << order, false);
+
+    meta->invalidated = true;
+    order = meta->order;
+    meta->dirty = false; // clear dirty flag
+    put_page_replica_meta(meta);
+    pr_info("[%s] Page replica invalidated: page=%p\n", __func__, page_replica);
+
+    return 0;
+}
+EXPORT_SYMBOL(make_page_replica_invalid);
+
+bool is_page_replica_invalid(struct page *page_replica)
+{
+    struct page_replica_meta *meta = get_page_replica_meta(page_replica);
+    bool invalidated = false;
+
+    if (meta) {
+        invalidated = meta->invalidated;
+        put_page_replica_meta(meta);
+    } else {
+        pr_info("[%s] No meta found for page=%p\n", __func__, page_replica);
+    }
+    return invalidated;
+}
+EXPORT_SYMBOL(is_page_replica_invalid);
 
 /* ========================================================================
  * XArray mapping management helpers
@@ -296,7 +336,7 @@ static void remove_replica_lru(struct page *page)
     if (meta) {
         __replica_lru_del(meta);
         xa_erase(&replica_meta_xa, (unsigned long)page);
-        pr_info("[%s] Removed page %p from LRU during error cleanup\n", __func__, page);
+        // pr_info("[%s] Removed page %p from LRU during error cleanup\n", __func__, page);
         put_page_replica_meta(meta);
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
@@ -702,7 +742,7 @@ static void *kmap_page_safe(struct page *page, unsigned int order)
             return NULL;
         }
 
-        pr_info("[%s] Mapped pages (order=%u) using kmap\n", __func__, order);
+        // pr_info("[%s] Mapped pages (order=%u) using kmap\n", __func__, order);
         return kaddr;
     } else {
         void *kaddr = kmap_local_page(page);
@@ -710,7 +750,7 @@ static void *kmap_page_safe(struct page *page, unsigned int order)
             pr_err("%s: Failed to kmap_local_page for order %u\n", __func__, order);
             return NULL;
         }
-        pr_info("[%s] Mapped pages (order=%u) using kmap_local_page\n", __func__, order);
+        // pr_info("[%s] Mapped pages (order=%u) using kmap_local_page\n", __func__, order);
         return kaddr;
     }
 }
@@ -719,10 +759,10 @@ static void *kunmap_page_safe(struct page *page, void *kaddr, unsigned int order
 {
     if (order > 0) {
         kunmap(page);
-        pr_info("[%s] Unmapped pages (order=%u) using kunmap\n", __func__, order);
+        // pr_info("[%s] Unmapped pages (order=%u) using kunmap\n", __func__, order);
     } else {
         kunmap_local(kaddr);
-        pr_info("[%s] Unmapped pages (order=%u) using kunmap_local\n", __func__, order);
+        // pr_info("[%s] Unmapped pages (order=%u) using kunmap_local\n", __func__, order);
     }
     return NULL;
 }
@@ -759,15 +799,15 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
         return REPLICA_ERROR_LOCK;
     }
 
-    print_page_info(page_replica, "Before unmap_mapping_pages");
-    print_page_info(page_replica + 1, "Before unmap_mapping_pages + 1");
-    print_page_info(page_replica + 2, "Before unmap_mapping_pages + 2");
+    // print_page_info(page_replica, "Before unmap_mapping_pages");
+    // print_page_info(page_replica + 1, "Before unmap_mapping_pages + 1");
+    // print_page_info(page_replica + 2, "Before unmap_mapping_pages + 2");
     
     unmap_mapping_pages(mapping, index, 1 << order, false);
     
-    print_page_info(page_replica, "Before dax_delete_mapping_entry replica");
-    print_page_info(page_replica + 1, "Before dax_delete_mapping_entry + 1");
-    print_page_info(page_replica + 2, "Before dax_delete_mapping_entry + 2");
+    // print_page_info(page_replica, "Before dax_delete_mapping_entry replica");
+    // print_page_info(page_replica + 1, "Before dax_delete_mapping_entry + 1");
+    // print_page_info(page_replica + 2, "Before dax_delete_mapping_entry + 2");
 
     dax_unlock_folio(folio_replica, cookie);
 
@@ -777,9 +817,9 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
     // return 1 if sucessed
     ret = dax_delete_mapping_entry(mapping, index);
 
-    print_page_info(page_replica, "After unmap_mapping_pages and dax_delete_mapping_entry");
-    print_page_info(page_replica + 1, "After unmap_mapping_pages and dax_delete_mapping_entry + 1");
-    print_page_info(page_replica + 2, "After unmap_mapping_pages and dax_delete_mapping_entry + 2");
+    // print_page_info(page_replica, "After unmap_mapping_pages and dax_delete_mapping_entry");
+    // print_page_info(page_replica + 1, "After unmap_mapping_pages and dax_delete_mapping_entry + 1");
+    // print_page_info(page_replica + 2, "After unmap_mapping_pages and dax_delete_mapping_entry + 2");
 
     return ret ? REPLICA_SUCCESS : REPLICA_ERROR_ANY;
 }
@@ -953,6 +993,9 @@ int destroy_page_replica(struct page *page_replica)
 } 
 EXPORT_SYMBOL(destroy_page_replica);
 
+
+// Writeback the page replica to original page if dirty, otherwise do nothing
+// Return REPLICA_SUCCESS if writeback done, REPLICA_SHARED_STATE if no write
 int writeback_page_replica(struct page *page_replica)
 {
     int ret;
@@ -1055,6 +1098,39 @@ skip_rw_clean:
 } 
 EXPORT_SYMBOL(writeback_page_replica);
 
+int fetch_page_replica(struct page *page_replica, unsigned int order, void *src_kaddr)
+{
+    int err;
+    size_t size = PAGE_SIZE << order;
+    struct page_replica_meta *meta = get_page_replica_meta(page_replica);
+    
+    if (!page_replica) {
+        pr_err("[%s] Invalid page replica pointer\n", __func__);
+        return -1;
+    }
+
+    /* Step 2: Copy data from source to replica using unified helper */
+    void *dst_kaddr = kmap_page_safe(page_replica, order);
+    if (!dst_kaddr) {
+        pr_err("[%s] Failed to kmap page replica for copy\n", __func__);
+        err = REPLICA_ERROR_ANY;
+    }
+
+    err = copy_data(src_kaddr, dst_kaddr, size);
+
+    kunmap_page_safe(page_replica, dst_kaddr, order);
+    if (err != REPLICA_SUCCESS) {
+        pr_err("[%s] Data copy failed: %d\n", __func__, err);
+
+    }
+
+    meta->invalidated = false; // Mark as valid
+    put_page_replica_meta(meta); // Decrement reference count
+
+    return 0;
+}
+EXPORT_SYMBOL(fetch_page_replica);
+
 /**
  * get_page_replica_with_ref - Get existing page replica by original PFN and order
  * @original_pfn: Original page PFN to look up
@@ -1121,7 +1197,7 @@ void put_page_replica_ref(struct page *page_replica)
         kfree(meta);
         pr_err("[%s] Freed metadata for page replica %p\n", __func__, page_replica);
     } else {
-        pr_info("[%s] Released reference for page replica %p, remaining refcount=%d\n", 
+        pr_info("[%s] Release reference for page replica %p, remaining refcount=%d\n", 
                 __func__, page_replica, refcount_read(&meta->refcount));
     }
 } 

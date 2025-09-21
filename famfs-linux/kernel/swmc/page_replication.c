@@ -856,9 +856,9 @@ retry_alloc:
                 __func__, retry_count);
     }
 
-    print_page_info(page_replica, "Allocated page replica");
-    print_page_info(page_replica + 1, "Allocated page replica + 1");
-    print_page_info(page_replica + 2, "Allocated page replica + 2");
+    // print_page_info(page_replica, "Allocated page replica");
+    // print_page_info(page_replica + 1, "Allocated page replica + 1");
+    // print_page_info(page_replica + 2, "Allocated page replica + 2");
     return page_replica;
 }
 
@@ -880,13 +880,11 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
     int err;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
 
-#ifdef CONFIG_SWMC_SANITY_CHECK
     // Check for duplicate replica, existance of replica should be checked before call create_page_replica
     if (xa_load(&original_to_replica_xa, pfn_key)) {
         pr_info("[%s] Replica already exists for pfn %lu\n", __func__, pfn_key);
         return print_replica_error(REPLICA_ERROR_EXIST);
     }
-#endif
 
     /* Step 1: Allocate page replica with retry and manual shrinking */
     page_replica = allocate_page_replica_with_retry(order);
@@ -1185,12 +1183,11 @@ void put_page_replica_ref(struct page *page_replica)
         return;
 
     meta = xa_load(&replica_meta_xa, (unsigned long)page_replica);
-#ifdef CONFIG_SWMC_SANITY_CHECK    
+
     if (!meta) {
         pr_err("[%s] No metadata found for page replica %p during put\n", __func__, page_replica);
         return; // No metadata, nothing to do
     }
-#endif
     
     if (unlikely(refcount_dec_and_test(&meta->refcount))) {
         pr_err("[%s]: Freeing metadata while handling coherency request should not happen!\n", __func__);

@@ -13,6 +13,7 @@
 #include <linux/slab.h>
 #include <linux/err.h>
 #include <swmc/swmc_kmsg.h>
+#include <linux/kthread.h>
 
 static swmc_kmsg_cbftn swmc_kmsg_cbftns[SWMC_KMSG_TYPE_MAX] = {NULL};
 
@@ -55,7 +56,16 @@ int swmc_kmsg_process_message(struct swmc_kmsg_message *message)
     callback = swmc_kmsg_cbftns[message->header.type];
 
     if (callback != NULL) {
-        return callback(message);
+        // make kthread to process the message
+        struct task_struct *tsk;
+        tsk =  kthread_run((int (*)(void *))callback, message, "swmc_kmsg_msg_processer");
+        
+        if (IS_ERR(tsk))
+            return PTR_ERR(tsk);
+
+        return 0;
+        
+        // return callback(message);
     } else {
         pr_err("No callback registered for message type %d\n", message->header.type);
         return -1; // Indicate error if no callback is registered, can be changed later

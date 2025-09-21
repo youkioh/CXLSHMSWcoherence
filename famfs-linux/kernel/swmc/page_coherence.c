@@ -33,6 +33,7 @@
 #include <linux/kobject.h>
 #include <linux/sysfs.h>
 #include <linux/pagemap.h>
+#include <linux/delay.h>
 
 #ifdef CONFIG_PAGE_COHERENCE
 
@@ -263,7 +264,7 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
     int fk = __fault_hash_key(original_pfn_val);
 
 	spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
+    // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     /* Search for existing fault handle */
     hlist_for_each_entry(fh, &faults[fk], list) {
@@ -281,8 +282,16 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         wait_for_completion(&complete);
         pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, pid);
+
+        if (fh->fh_flags & FH_STATE_WRITE) {
+            pr_info("[Info]%s: Fault handling for pfn=0x%lx needs to be redone to release DAX entry lock\n",
+                    __func__, original_pfn_val);
+            hlist_del_init(&fh->list);
+            kmem_cache_free(__fault_handle_cache, fh);
+            return NULL;
+        }
         spin_lock_irqsave(&faults_lock[fk], flags);
-        fh->fh_flags = is_write ? (fh->fh_flags | FH_STATE_WRITE) : 0;
+        fh->fh_flags = is_write ? FH_STATE_WRITE : 0;
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         return fh;
     }
@@ -315,9 +324,8 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
     bool need_redo = false;
     int fk = __fault_hash_key(fh->original_pfn_val);
 
-    DECLARE_COMPLETION_ONSTACK(remote_complete);
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
+    // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     /* If this local fault need to be redone, return true */
     if (fh->fh_flags & FH_STATE_NEED_REDO) {
@@ -354,7 +362,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     
     
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
+    // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     /* Search for existing fault handle */
     hlist_for_each_entry(fh, &faults[fk], list) {
@@ -424,7 +432,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
     int fk = __fault_hash_key(fh->original_pfn_val);
 
     spin_lock_irqsave(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
+    // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     if (fh->complete) {
         pr_info("[Info]%s: There is a local fault waiting for pfn=0x%lx\n", __func__, fh->original_pfn_val);
@@ -462,14 +470,11 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         return -EINVAL;
     }
 
-    pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx\n", __func__, payload->cxl_hdm_offset);
-
+    
     // calculate original pfn from payload->cxl_hdm_offset
     unsigned long original_phys_addr = cxl_hdm_base + payload->cxl_hdm_offset;
-    pr_info("[Info]%s: Original physical address calculated: 0x%lx\n", __func__, original_phys_addr);
-    pr_info("[Info]%s: Page order: %d\n", __func__, payload->page_order);
     pfn_t original_pfn;
-
+    
     if (payload->page_order == 0 || payload->page_order == PMD_ORDER) {
         original_pfn = pfn_to_pfn_t(original_phys_addr >> PAGE_SHIFT);
     }
@@ -477,7 +482,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         pr_err("[Error]%s: Invalid page order: %d\n", __func__, payload->page_order);
         return -EINVAL;
     }
-    pr_info("[Info]%s: Original PFN calculated: 0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+    pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx, page order=%d, original PFN=0x%lx.\n", __func__, payload->cxl_hdm_offset, payload->page_order, pfn_t_to_pfn(original_pfn));
 
     // find fault handle for remote fault handling
     struct fault_handle *fh;
@@ -532,8 +537,15 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
          */
 
         // Just make page_replica to invalid
-        make_page_replica_invalid(page_replica);
+        // make_page_replica_invalid(page_replica);
         put_page_replica_ref(page_replica);
+        struct task_struct *tsk;
+        tsk = kthread_run((int (*)(void *))destroy_page_replica, page_replica, "destroy_replica");
+        if (IS_ERR(tsk)) {
+            pr_err("[Error]%s: Failed to create kernel thread to destroy page replica %p\n", __func__, page_replica);
+        } else {
+            pr_info("[Info]%s: Created kernel thread %s to destroy page replica %p\n", __func__, tsk->comm, page_replica);
+        }
     }
 
     ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);
@@ -569,7 +581,7 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
         return -EINVAL;
     }
 
-    pr_info("[Info]%s: Handling ACK/NACK message for offset 0x%lx\n", __func__, msg->payload.cxl_hdm_offset);
+    // pr_info("[Info]%s: Handling ACK/NACK message for offset 0x%lx\n", __func__, msg->payload.cxl_hdm_offset);
 
     // find the wait station by ID
     struct wait_station *ws = wait_station(msg->header.ws_id);
@@ -652,7 +664,7 @@ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type,
         return ret;
     }
 
-    pr_info("[Info]%s: Waited at station, received response for %s message\n", __func__,
+    pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
             msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
     return 0;
 }
@@ -759,7 +771,7 @@ redo:
     
     page_replica = get_page_replica_with_ref(original_pfn, order);
 
-    if (page_replica && !is_page_replica_invalid(page_replica)) {
+    if (page_replica) {
         /* Replica exists - handle different fault scenarios */
         atomic64_inc(&page_coherence_replica_found_count);
         pr_info("[Info]%s: Replica found: %p\n", __func__, page_replica);
@@ -828,7 +840,10 @@ redo:
             pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
             put_page_replica_ref(page_replica);
             __finish_local_fault_handling(fh);
-            goto redo;
+            // wait for a second before redo
+            msleep(1);
+            return VM_FAULT_RETRY;
+            // goto redo;
         } else if (ret) {
             put_page_replica_ref(page_replica);
             return ret;
@@ -870,7 +885,9 @@ redo:
             */
         pr_info("[Info]%s: NACKed - retrying fault handling\n", __func__);
         __finish_local_fault_handling(fh);
-        goto redo;
+        msleep(1);
+        return VM_FAULT_RETRY;
+        // goto redo;
     } else if (ret) {
         return ret;
     }
@@ -890,18 +907,16 @@ redo:
              */
             pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
             __finish_local_fault_handling(fh);
-            goto redo;
+            msleep(1);
+            return VM_FAULT_RETRY;
+            // goto redo;
         } else if (ret) {
             return ret;
         }
     }
 
     /* Create replica page using page_replication.c API */
-    if (page_replica) {
-        fetch_page_replica(page_replica, order, kaddr);
-    } else {
-        page_replica = create_page_replica(order, original_pfn, kaddr);
-    }
+    page_replica = create_page_replica(order, original_pfn, kaddr);
 
 
     if (IS_ERR(page_replica)) {
@@ -937,7 +952,9 @@ map_pfn:
     if (__finish_local_fault_handling(fh)) {
         /* If we need to redo, go back to redo label */
         pr_info("[Info]%s: We should redo local fault handling\n", __func__);
-        goto redo;
+        msleep(1);
+        return VM_FAULT_RETRY;
+        // goto redo;
     }
     return 0;
 }

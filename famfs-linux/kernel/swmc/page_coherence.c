@@ -539,13 +539,14 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         // Just make page_replica to invalid
         // make_page_replica_invalid(page_replica);
         put_page_replica_ref(page_replica);
-        struct task_struct *tsk;
-        tsk = kthread_run((int (*)(void *))destroy_page_replica, page_replica, "destroy_replica");
-        if (IS_ERR(tsk)) {
-            pr_err("[Error]%s: Failed to create kernel thread to destroy page replica %p\n", __func__, page_replica);
-        } else {
-            pr_info("[Info]%s: Created kernel thread %s to destroy page replica %p\n", __func__, tsk->comm, page_replica);
-        }
+        // struct task_struct *tsk;
+        // tsk = kthread_run((int (*)(void *))destroy_page_replica, page_replica, "destroy_replica");
+        // if (IS_ERR(tsk)) {
+        //     pr_err("[Error]%s: Failed to create kernel thread to destroy page replica %p\n", __func__, page_replica);
+        // } else {
+        //     pr_info("[Info]%s: Created kernel thread %s to destroy page replica %p\n", __func__, tsk->comm, page_replica);
+        // }
+        destroy_page_replica(page_replica);
     }
 
     ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);

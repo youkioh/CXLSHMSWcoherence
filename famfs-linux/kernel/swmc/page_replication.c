@@ -1032,6 +1032,16 @@ int writeback_page_replica(struct page *page_replica)
         return REPLICA_ERROR_NOENT;
     }
 
+    // temporarliy casting to folio to use dax folio helpers
+    struct folio *folio_replica = page_folio(page_replica);
+    dax_entry_t cookie;
+    cookie = dax_lock_folio(folio_replica);
+    if (!cookie) {
+        pr_err("[%s] Failed to lock folio %p for unmapping\n", __func__, page_replica);
+        return REPLICA_ERROR_LOCK;
+    }
+    
+
     /* Step 2: Clean R/W bit of all PTE/PMD */
     struct address_space *mapping = page_replica->mapping;
     // TODO: Check if this works well.
@@ -1087,6 +1097,8 @@ skip_rw_clean:
     /* Step 6: kunmap */
     kunmap_page_safe(page_replica, src_kaddr, order);
     kunmap_page_safe(pfn_to_page(pfn_key), dst_kaddr, order);
+
+    dax_unlock_folio(folio_replica, cookie);
 
     pr_info("[%s] Successfully wrote back replica page %p to original pfn %lu\n",
             __func__, page_replica, pfn_key);

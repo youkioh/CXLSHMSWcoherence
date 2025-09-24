@@ -922,7 +922,7 @@ __famfs_fuse_filemap_fault(struct vm_fault *vmf, unsigned int pe_size,
 		      bool write_fault)
 {
 	// sungsu: print debug info
-	pr_info("[__famfs_fuse_filemap_fault] __famfs_fuse_filemap_fault is called, pe_size=%u, write_fault=%d\n", pe_size, write_fault);
+	// pr_info("[__famfs_fuse_filemap_fault] __famfs_fuse_filemap_fault is called, pe_size=%u, write_fault=%d\n", pe_size, write_fault);
 	struct inode *inode = file_inode(vmf->vma->vm_file);
 	vm_fault_t ret;
 	pfn_t pfn;
@@ -962,7 +962,7 @@ static vm_fault_t
 famfs_filemap_fault(struct vm_fault *vmf)
 {
 	// sungsu: print debug info
-	pr_info("[famfs_filemap_fault] famfs_filemap_fault is called, pgoff=%lx\n", vmf->pgoff);
+	// pr_info("[famfs_filemap_fault] famfs_filemap_fault is called, pgoff=%lx\n", vmf->pgoff);
 	return __famfs_fuse_filemap_fault(vmf, 0, famfs_is_write_fault(vmf));
 }
 
@@ -970,7 +970,7 @@ static vm_fault_t
 famfs_filemap_huge_fault(struct vm_fault *vmf, unsigned int pe_size)
 {
 	// sungsu: print debug info
-	pr_info("[famfs_filemap_huge_fault] famfs_filemap_huge_fault is called, pgoff=%lx, pe_size=%u\n", vmf->pgoff, pe_size);
+	// pr_info("[famfs_filemap_huge_fault] famfs_filemap_huge_fault is called, pgoff=%lx, pe_size=%u\n", vmf->pgoff, pe_size);
 	return __famfs_fuse_filemap_fault(vmf, pe_size, famfs_is_write_fault(vmf));
 }
 
@@ -1110,12 +1110,5 @@ famfs_fuse_mmap(struct file *file, struct vm_area_struct *vma)
 
 	file_accessed(file);
 	vma->vm_ops = &famfs_file_vm_ops;
-	pr_info("[%s] DEBUG_MAPPING: vma->vm_ops=%p\n", __func__, vma->vm_ops);
-	// sungsu: disable hugepage support by using below line, but now just use VM_HUGEPAGE
-	// vm_flags_set(vma, VM_NOHUGEPAGE | VM_MIXEDMAP);
-	vm_flags_set(vma, VM_HUGEPAGE | VM_MIXEDMAP);
-	pr_info("[%s]: vma->vm_flags=0x%lx\n", __func__, vma->vm_flags);
-	pr_info("[%s]: vma->vm_file->f_mapping->nrpages=%lu\n", __func__,
-		vma->vm_file->f_mapping->nrpages);
-	return 0;
-}
+	// pr_info("[%s] DEBUG_MAPPING: vma->vm_ops=%p\n", __func__, vma->vm_ops);
+	// sungsu: disable hugepage support by using below line, but now just use VM_HUG

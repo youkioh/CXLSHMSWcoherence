@@ -1009,6 +1009,8 @@ asmlinkage long sys_spu_run(int fd, __u32 __user *unpc,
 asmlinkage long sys_spu_create(const char __user *name,
 		unsigned int flags, umode_t mode, int fd);
 
+asmlinkage long sys_flush_replicas(void);
+
 
 /*
  * Deprecated system calls which are still defined in

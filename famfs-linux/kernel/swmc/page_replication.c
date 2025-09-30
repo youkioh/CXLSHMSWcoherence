@@ -21,6 +21,81 @@
 #include <linux/pagewalk.h>
 #include <linux/dax.h>
 #include <asm/cacheflush.h>
+#include <linux/kernel.h>
+#include <linux/syscalls.h>
+
+/* =============================================================================
+ * SYSFS INTERFACE FOR PAGE REPLICATION STATISTICS
+ * ============================================================================= */
+
+/* Page allocation tracking */
+static atomic64_t page_replica_allocated_pages = ATOMIC64_INIT(0);
+
+static ssize_t allocated_pages_show(struct kobject *kobj, 
+                                   struct kobj_attribute *attr, 
+                                   char *buf)
+{
+    return sprintf(buf, "%lld\n", atomic64_read(&page_replica_allocated_pages));
+}
+
+static struct kobj_attribute allocated_pages_attribute = 
+    __ATTR(allocated_pages, 0444, allocated_pages_show, NULL);
+
+static struct attribute *page_replica_attrs[] = {
+    &allocated_pages_attribute.attr,
+    NULL,
+};
+
+static struct attribute_group page_replica_attr_group = {
+    .attrs = page_replica_attrs,
+};
+
+static struct kobject *page_replica_kobj;
+
+static int __init page_replica_sysfs_init(void)
+{
+    int ret;
+    
+    page_replica_kobj = kobject_create_and_add("page_replica", kernel_kobj);
+    if (!page_replica_kobj)
+        return -ENOMEM;
+    
+    ret = sysfs_create_group(page_replica_kobj, &page_replica_attr_group);
+    if (ret) {
+        kobject_put(page_replica_kobj);
+        return ret;
+    }
+    
+    pr_info("[%s] page_replica sysfs initialized\n", __func__);
+    return 0;
+}
+
+static void __exit page_replica_sysfs_exit(void)
+{
+    if (page_replica_kobj) {
+        sysfs_remove_group(page_replica_kobj, &page_replica_attr_group);
+        kobject_put(page_replica_kobj);
+    }
+}
+
+/* Helper functions to track page allocation/deallocation */
+static inline void track_page_alloc(unsigned int order)
+{
+    long pages = 1L << order;
+    atomic64_add(pages, &page_replica_allocated_pages);
+    pr_debug("[%s] Allocated 2^%u = %ld pages, total: %lld\n", 
+             __func__, order, pages, atomic64_read(&page_replica_allocated_pages));
+}
+
+static inline void track_page_free(unsigned int order)
+{
+    long pages = 1L << order;
+    atomic64_sub(pages, &page_replica_allocated_pages);
+    pr_debug("[%s] Freed 2^%u = %ld pages, total: %lld\n", 
+             __func__, order, pages, atomic64_read(&page_replica_allocated_pages));
+}
+
+
 
 
 void print_page_info(struct page *page, const char *context)
@@ -156,20 +231,20 @@ static struct page_replica_meta *get_page_replica_meta(struct page *page_replica
     meta = xa_load(&replica_meta_xa, (unsigned long)page_replica);
     if (meta && refcount_inc_not_zero(&meta->refcount)) {
         spin_unlock_irqrestore(&replica_lru_lock, flags);
-        pr_info("[%s] Found page replica meta: page=%p, order=%u, refcount=%d\n",
-                __func__, meta->page, meta->order, refcount_read(&meta->refcount));
+        // pr_info("[%s] Found page replica meta: page=%p, order=%u, refcount=%d\n",
+        //         __func__, meta->page, meta->order, refcount_read(&meta->refcount));
         return meta;
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
-    pr_info("[%s] No meta for page=%p\n", __func__, page_replica);
+    // pr_info("[%s] No meta for page=%p\n", __func__, page_replica);
     return NULL;
 }
 
 /* Reference counting helpers for safe lock dropping */
 static void put_page_replica_meta(struct page_replica_meta *meta)
 {
-    pr_info("[%s] put_page_replica_meta: page=%p, order=%u, refcount=%d\n",
-            __func__, meta->page, meta->order, refcount_read(&meta->refcount));
+    // pr_info("[%s] put_page_replica_meta: page=%p, order=%u, refcount=%d\n",
+    //         __func__, meta->page, meta->order, refcount_read(&meta->refcount));
     if (refcount_dec_and_test(&meta->refcount)){
         pr_info("[%s] Freeing page replica meta: page=%p, order=%u, refcount=%d\n",
                 __func__, meta->page, meta->order, refcount_read(&meta->refcount));
@@ -301,6 +376,7 @@ static int insert_replica_lru(struct page *page, unsigned int order)
 {
     struct page_replica_meta *m;
     void *ret;
+    unsigned long flags;
 
     m = kzalloc(sizeof(*m), GFP_KERNEL);
     if (!m)
@@ -313,15 +389,15 @@ static int insert_replica_lru(struct page *page, unsigned int order)
     m->dirty = false;
     INIT_LIST_HEAD(&m->lru);
 
-    spin_lock(&replica_lru_lock);
+    spin_lock_irqsave(&replica_lru_lock, flags);
     ret = xa_store(&replica_meta_xa, (unsigned long)page, m, GFP_ATOMIC);
     if (xa_is_err(ret)) {
-        spin_unlock(&replica_lru_lock);
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
         kfree(m);
         return xa_err(ret);
     }
     __replica_lru_add_active(m);
-    spin_unlock(&replica_lru_lock);
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
     return 0;
 }
 
@@ -350,7 +426,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
         return false;
     }
     unsigned long reference_count = 0;
-    pr_info("[%s] Checking if page replica %p is referenced\n", __func__, page_replica);
+    // pr_info("[%s] Checking if page replica %p is referenced\n", __func__, page_replica);
 
     // TODO: We need to ensure for concurrency safety later. for now, we just remove it from LRU and mapping XArrays.
     // TODO: More understanding with reference counting needed. Why does it needed? Can we just get it from argument?
@@ -359,7 +435,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
         pr_err("[%s] Failed to get page replica meta for %p\n", __func__, page_replica);
         return false;
     }
-    pr_info("[%s] page_replica_meta: %p, order: %d\n", __func__, m, m->order);
+    // pr_info("[%s] page_replica_meta: %p, order: %d\n", __func__, m, m->order);
     int order = m->order;
 
     put_page_replica_meta(m); // Decrement reference count
@@ -368,8 +444,8 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
     pgoff_t start_index = page_replica->index;
     pgoff_t count = 1UL << order;
 
-    pr_info("[%s] Checking page replica %p in mapping %p, start_index: %lu, count: %lu\n",
-            __func__, page_replica, mapping, start_index, count);
+    // pr_info("[%s] Checking page replica %p in mapping %p, start_index: %lu, count: %lu\n",
+    //         __func__, page_replica, mapping, start_index, count);
 
     if (!mapping) {
         pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
@@ -377,7 +453,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
     }
 
     struct rw_semaphore *sem = &mapping->i_mmap_rwsem;
-    pr_info("[%s] Semaphore ptr: %p, mapping: %p\n", __func__, sem, mapping);
+    // pr_info("[%s] Semaphore ptr: %p, mapping: %p\n", __func__, sem, mapping);
     i_mmap_lock_read(mapping);
 
     // 락을 잡은 후 매핑 재검사
@@ -391,16 +467,16 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
 
     i_mmap_unlock_read(mapping);
 
-    if (ret) {
+    if (ret < 0) { // if ret is negetive, it's an error code
         pr_err("[%s] Failed to walk page mapping for page replica %p: %d\n", __func__, page_replica, ret);
         return false;
     }
 
     if ((unsigned long)reference_count > 0) {
-        pr_info("[%s] Page replica %p is referenced, count=%lu\n", __func__, page_replica, (unsigned long)reference_count);
+        // pr_info("[%s] Page replica %p is referenced, count=%lu\n", __func__, page_replica, (unsigned long)reference_count);
         return true;
     } else {
-        pr_info("[%s] Page replica %p is not referenced\n", __func__, page_replica);
+        // pr_info("[%s] Page replica %p is not referenced\n", __func__, page_replica);
         return false;
     }
 }
@@ -412,7 +488,7 @@ bool check_page_replica_dirty(struct page *page_replica)
         return false;
     }
     
-    pr_info("[%s] Checking if page replica %p is dirty\n", __func__, page_replica);
+    // pr_info("[%s] Checking if page replica %p is dirty\n", __func__, page_replica);
     bool is_dirty = false;
     struct page_replica_meta *m = get_page_replica_meta(page_replica);
     if (!m) {
@@ -436,7 +512,7 @@ static bool check_page_replica_dirty_and_clean(struct page *page_replica)
         return false;
     }
     
-    pr_info("[%s] Checking if page replica %p is dirty\n", __func__, page_replica);
+    // pr_info("[%s] Checking if page replica %p is dirty\n", __func__, page_replica);
     bool is_dirty = false;
     struct page_replica_meta *m = get_page_replica_meta(page_replica);
     if (!m) {
@@ -521,6 +597,14 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
             freed++;
             pr_debug("[%s] Successfully reclaimed page %p (pfn=0x%lx)\n", 
                     __func__, m->page, page_to_pfn(m->page));
+        } else {
+            pr_err("[%s] Failed to flush page replica %p: %d\n", 
+                    __func__, m->page, ret);
+            /* On failure, reinsert to inactive list MRU */
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            __replica_lru_move_to_inactive_mru(m);
+            m->on_lru = true;
+            spin_unlock_irqrestore(&replica_lru_lock, flags);
         }
         put_page_replica_meta(m);
     }
@@ -579,15 +663,15 @@ static unsigned int replica_age_active_to_inactive(unsigned long nr)
             spin_lock_irqsave(&replica_lru_lock, flags);
             __replica_lru_move_to_active_mru(m);
             m->on_lru = true;
-            pr_info("[%s] Keeping referenced page %p in active\n", 
-                __func__, m->page);
+            // pr_info("[%s] Keeping referenced page %p in active\n", 
+            //     __func__, m->page);
             } else {
             /* Not referenced - move to inactive list MRU */
             spin_lock_irqsave(&replica_lru_lock, flags);
             __replica_lru_move_to_inactive_mru(m);
             m->on_lru = true;
             aged++;
-            pr_info("[%s] Aged page %p to inactive\n", __func__, m->page);
+            // pr_info("[%s] Aged page %p to inactive\n", __func__, m->page);
         }
         spin_unlock_irqrestore(&replica_lru_lock, flags);
         put_page_replica_meta(m);
@@ -618,6 +702,7 @@ static unsigned long replica_shrink_count(struct shrinker *s,
     unsigned long flags, n;
     spin_lock_irqsave(&replica_lru_lock, flags);
     n  = __replica_list_len(&replica_inactive_lru);
+    pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
     n += __replica_list_len(&replica_active_lru) / REPLICA_ACTIVE_TO_INACTIVE_RATIO;
     spin_unlock_irqrestore(&replica_lru_lock, flags);
 
@@ -632,7 +717,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     unsigned long inactive_len, freed = 0;
     unsigned long active_len;
     
-    pr_info("[%s] shrink_scan: nr_to_scan=%lu\n", __func__, nr_to_scan);
+    pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
     /* Step 1: Check if inactive list has enough pages for direct reclaim */
     spin_lock_irqsave(&replica_lru_lock, flags);
@@ -642,7 +727,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
         /* Step 1-1: Direct reclaim from inactive list */
         freed = replica_reclaim_from_inactive(nr_to_scan);
-        pr_info("[%s] Direct reclaim: inactive_len=%lu, freed=%lu\n", 
+        pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
                 __func__, inactive_len, freed);
         return freed;
     }
@@ -711,6 +796,26 @@ static int __init replica_shrinker_init(void)
 
 subsys_initcall(replica_shrinker_init);
 
+SYSCALL_DEFINE0(flush_replicas)
+{
+    pr_info("[syscall] flush_replicas called\n");
+    int n;
+    unsigned long flags;
+    unsigned int aged;
+    unsigned long freed;
+
+    pr_info("[syscall] flush_replicas: aging active to inactive\n");
+    aged = replica_age_active_to_inactive(REPLICA_MAX_LIST_COUNT);
+    pr_info("[syscall] flush_replicas: aged %u pages\n", aged);
+
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    n = __replica_list_len(&replica_inactive_lru);
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+    pr_info("[syscall] flush_replicas: reclaiming for %d pages\n", n);
+    freed = replica_reclaim_from_inactive(n);  
+    pr_info("[syscall] flush_replicas: reclaimed %lu pages\n", freed); 
+    return 0;
+}
 
 /* ========================================================================
  * Public API for page coherence integration
@@ -726,8 +831,8 @@ static int copy_data(void *src_kaddr, void *dst_kaddr, size_t size)
     }
     
     memcpy(dst_kaddr, src_kaddr, size);
-    pr_info("[%s] Copied %zu bytes from %p to %p\n", 
-            __func__, size, src_kaddr, dst_kaddr);
+    // pr_info("[%s] Copied %zu bytes from %p to %p\n", 
+    //         __func__, size, src_kaddr, dst_kaddr);
     
     return REPLICA_SUCCESS;
 }
@@ -782,13 +887,15 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
         pr_err("[%s] Page %p has no mapping, which is already cleaned because of process termination\n", __func__, page_replica);
         return REPLICA_SUCCESS; // No mapping, nothing to unmap
     }
+
+    // if (unlikely(!mapping)) {
+    //     pr_err("[%s] Page %p has no mapping, cannot unmap\n", __func__, page_replica);
+    //     return REPLICA_ERROR_INVAL;
+    // }
+
     unsigned long index = page_replica->index; // page_replica->index is identical with linear_page_index(vma, address & ~(size - 1)) and also with vmf->pgoff, which is the key of Xarray(mapping)
     int ret;
 
-    if (unlikely(!mapping)) {
-        pr_err("[%s] Page %p has no mapping, cannot unmap\n", __func__, page_replica);
-        return REPLICA_ERROR_INVAL;
-    }
 
     // temporarliy casting to folio to use dax folio helpers
     struct folio *folio_replica = page_folio(page_replica);
@@ -833,6 +940,7 @@ static struct page *allocate_page_replica_with_retry(unsigned int order)
 
 retry_alloc:
     page_replica = alloc_pages(gfp_flags, order);
+    
     if (unlikely(!page_replica)) {
         if (retry_count < MAX_ALLOCATE_RETRIES) {
             /* Calculate how many pages to free */
@@ -859,6 +967,7 @@ retry_alloc:
     // print_page_info(page_replica, "Allocated page replica");
     // print_page_info(page_replica + 1, "Allocated page replica + 1");
     // print_page_info(page_replica + 2, "Allocated page replica + 2");
+    track_page_alloc(order);
     return page_replica;
 }
 
@@ -882,7 +991,7 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
 
     // Check for duplicate replica, existance of replica should be checked before call create_page_replica
     if (xa_load(&original_to_replica_xa, pfn_key)) {
-        pr_info("[%s] Replica already exists for pfn %lu\n", __func__, pfn_key);
+        pr_err("[Err]%s: Replica already exists for pfn %lu\n", __func__, pfn_key);
         return print_replica_error(REPLICA_ERROR_EXIST);
     }
 
@@ -936,6 +1045,7 @@ remove_from_lru:
 
 free_pages:
     __free_pages(page_replica, order);
+    track_page_free(order);
     return ERR_PTR(err);
 } 
 EXPORT_SYMBOL(create_page_replica);
@@ -944,7 +1054,7 @@ EXPORT_SYMBOL(create_page_replica);
 int destroy_page_replica(struct page *page_replica)
 {
     int err;
-    pr_info("[%s] Destroying page replica %p\n", __func__, page_replica);
+    // pr_info("[%s] Destroying page replica %p\n", __func__, page_replica);
 
     if (!page_replica) {
         pr_err("[%s] Invalid page replica pointer\n", __func__);
@@ -984,6 +1094,7 @@ int destroy_page_replica(struct page *page_replica)
     
     /* Step 4: Free pages */
     __free_pages(page_replica, order);
+    track_page_free(order);
     pr_info("[%s] Successfully destroyed page replica %p (order=%u)\n",
             __func__, page_replica, order);
 
@@ -998,13 +1109,13 @@ int writeback_page_replica(struct page *page_replica)
 {
     int ret;
 
-    pr_info("[%s] Checking page replica is dirty before writeback\n", __func__);
+    // pr_info("[%s] Checking page replica is dirty before writeback\n", __func__);
     if (!check_page_replica_dirty_and_clean(page_replica)) {
         pr_info("[%s] Page replica %p is not dirty, no writeback needed\n", __func__, page_replica);
         return REPLICA_SHARED_STATE; // No writeback needed
     }
 
-    pr_info("[%s] Writing back page replica %p\n", __func__, page_replica);
+    // pr_info("[%s] Writing back page replica %p\n", __func__, page_replica);
 
     if (!page_replica) {
         pr_err("[%s] Invalid page replica pointer\n", __func__);
@@ -1028,18 +1139,13 @@ int writeback_page_replica(struct page *page_replica)
     /* Step 1: Get original pfn with Xarray */
     unsigned long pfn_key = replica_to_original_pfn(page_replica);
     if (!pfn_key) {
-        pr_info("[%s] No original PFN mapping found for replica page %p\n", __func__, page_replica);
+        pr_err("[Err]%s: No original PFN mapping found for replica page %p\n", __func__, page_replica);
         return REPLICA_ERROR_NOENT;
     }
 
     // temporarliy casting to folio to use dax folio helpers
     struct folio *folio_replica = page_folio(page_replica);
     dax_entry_t cookie;
-    cookie = dax_lock_folio(folio_replica);
-    if (!cookie) {
-        pr_err("[%s] Failed to lock folio %p for unmapping\n", __func__, page_replica);
-        return REPLICA_ERROR_LOCK;
-    }
     
 
     /* Step 2: Clean R/W bit of all PTE/PMD */
@@ -1049,6 +1155,12 @@ int writeback_page_replica(struct page *page_replica)
         pr_info("[%s] Page %p has no mapping, so skip cleaning R/W bit\n", __func__, page_replica);
         // for test
         goto skip_rw_clean;
+    }
+
+    cookie = dax_lock_folio(folio_replica);
+    if (!cookie) {
+        pr_err("[%s] Failed to lock folio %p for unmapping\n", __func__, page_replica);
+        return REPLICA_ERROR_LOCK;
     }
 
     struct vm_area_struct *vma;
@@ -1062,6 +1174,8 @@ int writeback_page_replica(struct page *page_replica)
         cond_resched();
     }
     i_mmap_unlock_read(mapping);
+
+    dax_unlock_folio(folio_replica, cookie);
 
 skip_rw_clean:
     /* Step 3: kmap for copy */
@@ -1097,9 +1211,7 @@ skip_rw_clean:
     /* Step 6: kunmap */
     kunmap_page_safe(page_replica, src_kaddr, order);
     kunmap_page_safe(pfn_to_page(pfn_key), dst_kaddr, order);
-
-    dax_unlock_folio(folio_replica, cookie);
-
+    
     pr_info("[%s] Successfully wrote back replica page %p to original pfn %lu\n",
             __func__, page_replica, pfn_key);
 
@@ -1206,8 +1318,8 @@ void put_page_replica_ref(struct page *page_replica)
         kfree(meta);
         pr_err("[%s] Freed metadata for page replica %p\n", __func__, page_replica);
     } else {
-        pr_info("[%s] Release reference for page replica %p, remaining refcount=%d\n", 
-                __func__, page_replica, refcount_read(&meta->refcount));
+        // pr_info("[%s] Release reference for page replica %p, remaining refcount=%d\n", 
+        //         __func__, page_replica, refcount_read(&meta->refcount));
     }
 } 
 EXPORT_SYMBOL(put_page_replica_ref);
@@ -1257,3 +1369,10 @@ int __flush_page_replica(struct page *page_replica)
     pr_info("[%s] Successfully flushed page replica %p\n", __func__, page_replica);
     return REPLICA_SUCCESS;
 }
+
+static int __init page_replication_init(void)
+{
+    return page_replica_sysfs_init();
+}
+
+subsys_initcall(page_replication_init);

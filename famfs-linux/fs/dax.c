@@ -1789,13 +1789,13 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	// pr_info("[dax_fault_iter] page_coherence_fault done, pfn: %lu, nr_pages_mapped: %d\n",
 	// 	pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 
-	pr_info("[%s] DEBUG_MAPPING: dax_iomap_direct_access finished for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
-	__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
+	// pr_info("[%s] DEBUG_MAPPING: dax_iomap_direct_access finished for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
+	// __func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
     /* Normal DAX fs insertion path */
 	*entry = dax_insert_entry(xas, vmf, iter, *entry, pfn, entry_flags);
 
-	pr_info("[%s] DEBUG_MAPPING: dax_insert_entry done for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
-		__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
+	// pr_info("[%s] DEBUG_MAPPING: dax_insert_entry done for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
+	// 	__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
 	// // sungsu: print the nr_pages_mapped of folio
 	// pr_info("[dax_fault_iter] dax_insert_entry done, pfn: %lu, nr_pages_mapped: %d\n",
 	// 	pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
@@ -1812,19 +1812,19 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	/* insert PMD pfn */
 	if (pmd) {
 		if (vmf->vma->vm_file) {
-			pr_info("MY_DEBUG: This is a FILE VMA. file=%s, mapping=%p\n",
-					vmf->vma->vm_file->f_path.dentry->d_name.name,
-					vmf->vma->vm_file->f_mapping);
+			// pr_info("MY_DEBUG: This is a FILE VMA. file=%s, mapping=%p\n",
+			// 		vmf->vma->vm_file->f_path.dentry->d_name.name,
+			// 		vmf->vma->vm_file->f_mapping);
 		} else {
-			pr_info("MY_DEBUG: This is an ANONYMOUS VMA. No file associated.\n");
+			// pr_info("MY_DEBUG: This is an ANONYMOUS VMA. No file associated.\n");
 		}
 		// sungsu: vmf_insert_pfn_pmd is called
 		pr_info("[dax_fault_iter] Call vmf_insert_pfn_pmd() for PMD pfn insertion.\n");
 		*pfnp = pfn;
 		
 		ret = vmf_insert_pfn_pmd(vmf, pfn, write);
-		pr_info("[%s] DEBUG_MAPPING: vmf_insert_pfn_pmd returned %d for pfn %lu at addr 0x%lx, mapping: %p\n, mapcount: %d\n",
-			__func__, ret, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
+		// pr_info("[%s] DEBUG_MAPPING: vmf_insert_pfn_pmd returned %d for pfn %lu at addr 0x%lx, mapping: %p\n, mapcount: %d\n",
+		// 	__func__, ret, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
 
 		// check every pid and pte that maps this pfn
 		struct address_space *temp_mapping = vmf->vma->vm_file->f_mapping;
@@ -1834,8 +1834,8 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		i_mmap_lock_read(temp_mapping);
 		struct vm_area_struct *vma;
 		vma_interval_tree_foreach(vma, &temp_mapping->i_mmap, index, end) {
-			pr_info("[%s] DEBUG_MAPPING: vma %p, start: 0x%lx, end: 0x%lx, vm_flags: 0x%lx, anon_vma: %p, vm_ops: %p, vm_file: %p, address_space %p, file name:%s\n",
-				__func__, vma, vma->vm_start, vma->vm_end, vma->vm_flags, vma->anon_vma, vma->vm_ops, vma->vm_file, vma->vm_file->f_mapping, vma->vm_file->f_path.dentry->d_name.name);
+			// pr_info("[%s] DEBUG_MAPPING: vma %p, start: 0x%lx, end: 0x%lx, vm_flags: 0x%lx, anon_vma: %p, vm_ops: %p, vm_file: %p, address_space %p, file name:%s\n",
+			// 	__func__, vma, vma->vm_start, vma->vm_end, vma->vm_flags, vma->anon_vma, vma->vm_ops, vma->vm_file, vma->vm_file->f_mapping, vma->vm_file->f_path.dentry->d_name.name);
 		}
 		i_mmap_unlock_read(temp_mapping);
 

@@ -583,9 +583,9 @@ static int __init init_cxl_shm(void)
         cxl_kmsg_handler->win_rx[i] = NULL;
     }
 
-    // ADD 90 GB to start_addr to account for the CXL shared memory region
+    // ADD 94 GB to start_addr to account for the CXL shared memory region
     // TODO: Should change daxctl or ndctl or FamFS allocator later.
-    start_addr += 90UL << 30; // 90 GB
+    start_addr += 94UL << 30; // 94 GB
 
     /* Map TX windows: where this node sends to other nodes */
     for (i = 0; i < MAX_NODES; i++) {

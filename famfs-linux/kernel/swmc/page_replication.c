@@ -717,6 +717,9 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     unsigned long flags;
     unsigned long inactive_len, freed = 0;
     unsigned long active_len;
+    bool age_again = true;
+    unsigned int aged = 0;
+    unsigned int age_mult = 1;
     
     pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
@@ -739,7 +742,17 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     
     active_len = __replica_list_len(&replica_active_lru);
     pr_info("[%s] Active list length: active_len=%lu\n", __func__, active_len);
-    unsigned int aged = replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT);
+
+    while (age_again) {
+        aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
+        if (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            age_mult *= 2;
+            pr_info("[%s] Aged only %u pages, not enough to reclaim. Scan again %lu entries.\n", __func__, aged, nr_to_scan * REPLICA_AGING_MULT * age_mult);
+        } else {
+            pr_info("[%s] Aged %u pages, enough to reclaim\n", __func__, aged);
+            age_again = false;
+        }
+    }
     
     /* Step 3: Try reclaim again after aging */
     spin_lock_irqsave(&replica_lru_lock, flags);

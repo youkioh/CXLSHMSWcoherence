@@ -722,14 +722,26 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     // check if file path contains ".meta", if yes, skip page coherence handling
-    char *buff = (char *)__get_free_page(GFP_KERNEL);
-    char *path = d_path(&vmf->vma->vm_file->f_path, buff, PAGE_SIZE);
-    if (strstr(path, ".meta")) {
-        pr_info("[Info]%s: Meta file access, skipping page coherence handling for %s\n", __func__, path);
-        free_page((unsigned long)buff);
-        return 0;
+    // char *buff = (char *)__get_free_page(GFP_KERNEL);
+    // char *path = d_path(&vmf->vma->vm_file->f_path, buff, PAGE_SIZE);
+    // if (strstr(path, ".meta")) {
+    //     pr_info("[Info]%s: Meta file access, skipping page coherence handling for %s\n", __func__, path);
+    //     free_page((unsigned long)buff);
+    //     return 0;
+    // }
+    // free_page((unsigned long)buff);
+
+    struct file *file = vmf->vma->vm_file;
+    const char *filename;
+    filename = file->f_path.dentry->d_name.name;
+    if (strstr(filename, ".log")) {
+        pr_info("[Info]%s: .log Meta file access, skipping page coherence handling for %s\n", __func__, filename);
+        return 0; 
     }
-    free_page((unsigned long)buff);
+    if (strstr(filename, ".superblock")) {
+        pr_info("[Info]%s: .superblock Meta file access, skipping page coherence handling for %s\n", __func__, filename);
+        return 0; 
+    }
 
     // Validate original page exists for devdax
     struct page *original_page = pfn_to_page(pfn_t_to_pfn(original_pfn));

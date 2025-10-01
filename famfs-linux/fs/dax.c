@@ -1756,11 +1756,14 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		return pmd ? VM_FAULT_FALLBACK : dax_fault_return(err);
 
 #ifdef CONFIG_PAGE_COHERENCE
+	pr_info("[Info]%s: TGID=%d, PID=%d, pfn=0x%lx, pmd=%d, write=%d\n",
+		__func__, current->tgid, current->pid,
+		pfn_t_to_pfn(pfn), pmd, write);
+
 	// // entry point to the page coherence management code
 	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
-	// if (ret == VM_FAULT_NOPAGE) return VM_FAULT_NOPAGE;
-
 	if (ret == VM_FAULT_RETRY) return ret;
+
     // if (ret) {
 	// 	pr_info("[%s] page_coherence_fault returned with error %d for pfn %lu at addr 0x%lx\n",
 	// 		__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
@@ -1785,7 +1788,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 #endif // CONFIG_PAGE_COHERENCE
 
 	// sungsu: print the nr_pages_mapped of folio
-	struct folio *folio = pfn_folio(pfn_t_to_pfn(pfn));
+	// struct folio *folio = pfn_folio(pfn_t_to_pfn(pfn));
 	// pr_info("[dax_fault_iter] page_coherence_fault done, pfn: %lu, nr_pages_mapped: %d\n",
 	// 	pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 
@@ -1827,17 +1830,17 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		// 	__func__, ret, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
 
 		// check every pid and pte that maps this pfn
-		struct address_space *temp_mapping = vmf->vma->vm_file->f_mapping;
-		int count = 1UL << dax_entry_order(entry);
-		int index = xas->xa_index & ~(count - 1);
-		int end = index + count - 1;
-		i_mmap_lock_read(temp_mapping);
-		struct vm_area_struct *vma;
-		vma_interval_tree_foreach(vma, &temp_mapping->i_mmap, index, end) {
-			// pr_info("[%s] DEBUG_MAPPING: vma %p, start: 0x%lx, end: 0x%lx, vm_flags: 0x%lx, anon_vma: %p, vm_ops: %p, vm_file: %p, address_space %p, file name:%s\n",
-			// 	__func__, vma, vma->vm_start, vma->vm_end, vma->vm_flags, vma->anon_vma, vma->vm_ops, vma->vm_file, vma->vm_file->f_mapping, vma->vm_file->f_path.dentry->d_name.name);
-		}
-		i_mmap_unlock_read(temp_mapping);
+		// struct address_space *temp_mapping = vmf->vma->vm_file->f_mapping;
+		// int count = 1UL << dax_entry_order(entry);
+		// int index = xas->xa_index & ~(count - 1);
+		// int end = index + count - 1;
+		// i_mmap_lock_read(temp_mapping);
+		// struct vm_area_struct *vma;
+		// vma_interval_tree_foreach(vma, &temp_mapping->i_mmap, index, end) {
+		// 	// pr_info("[%s] DEBUG_MAPPING: vma %p, start: 0x%lx, end: 0x%lx, vm_flags: 0x%lx, anon_vma: %p, vm_ops: %p, vm_file: %p, address_space %p, file name:%s\n",
+		// 	// 	__func__, vma, vma->vm_start, vma->vm_end, vma->vm_flags, vma->anon_vma, vma->vm_ops, vma->vm_file, vma->vm_file->f_mapping, vma->vm_file->f_path.dentry->d_name.name);
+		// }
+		// i_mmap_unlock_read(temp_mapping);
 
 		// print_page_info(&folio->page, "dax_fault_iter");
 		// print_page_info(&folio->page + 1, "dax_fatul_iter + 1");

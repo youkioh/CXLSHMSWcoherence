@@ -349,25 +349,25 @@ static void remove_bidir_mapping(struct page *page_replica, unsigned long pfn_ke
 
 static void __replica_lru_add_active(struct page_replica_meta *m)
 {
-    pr_info("[%s] ADD to ACTIVE: page=%p order=%u\n", __func__, m->page, m->order);
+    // pr_info("[%s] ADD to ACTIVE: page=%p order=%u\n", __func__, m->page, m->order);
     list_add(&m->lru, &replica_active_lru);
 }
 
 static void __replica_lru_move_to_active_mru(struct page_replica_meta *m)
 {
-    pr_info("[%s] MOVE to ACTIVE: page=%p\n", __func__, m->page);
+    // pr_info("[%s] MOVE to ACTIVE: page=%p\n", __func__, m->page);
     list_move(&m->lru, &replica_active_lru);
 }
 
 static void __replica_lru_move_to_inactive_mru(struct page_replica_meta *m)
 {
-    pr_info("[%s] MOVE to INACTIVE: page=%p\n", __func__, m->page);
+    // pr_info("[%s] MOVE to INACTIVE: page=%p\n", __func__, m->page);
     list_move(&m->lru, &replica_inactive_lru);
 }
 
 static void __replica_lru_del(struct page_replica_meta *m)
 {
-    pr_info("[%s] DEL: page=%p\n", __func__, m->page);
+    // pr_info("[%s] DEL: page=%p\n", __func__, m->page);
     list_del_init(&m->lru);
     m->on_lru = false;
 }
@@ -483,7 +483,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
 
 bool check_page_replica_dirty(struct page *page_replica)
 {
-    if (!page_replica) {
+    if (unlikely(!page_replica)) {
         pr_err("[%s] Invalid page replica pointer\n", __func__);
         return false;
     }
@@ -496,11 +496,11 @@ bool check_page_replica_dirty(struct page *page_replica)
         return false;
     }
     is_dirty = m->dirty;
-    if (is_dirty) {
-        pr_info("[%s] Page replica %p is dirty\n", __func__, page_replica);
-    } else {
-        pr_info("[%s] Page replica %p is clean\n", __func__, page_replica);
-    }
+    // if (is_dirty) {
+    //     pr_info("[%s] Page replica %p is dirty\n", __func__, page_replica);
+    // } else {
+    //     pr_info("[%s] Page replica %p is clean\n", __func__, page_replica);
+    // }
     put_page_replica_meta(m); // Decrement reference count
     return is_dirty;
 }
@@ -520,12 +520,13 @@ static bool check_page_replica_dirty_and_clean(struct page *page_replica)
         return false;
     }
     is_dirty = m->dirty;
-    if (is_dirty) {
-        pr_info("[%s] Page replica %p is dirty\n", __func__, page_replica);
-        m->dirty = false;
-    } else {
-        pr_info("[%s] Page replica %p is clean\n", __func__, page_replica);
-    }
+    // if (is_dirty) {
+    //     pr_info("[%s] Page replica %p is dirty\n", __func__, page_replica);
+    //     m->dirty = false;
+    // } else {
+    //     pr_info("[%s] Page replica %p is clean\n", __func__, page_replica);
+    // }
+    m->dirty = false; // clear dirty flag
     put_page_replica_meta(m); // Decrement reference count
     return is_dirty;
 }
@@ -567,8 +568,8 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
     
-    pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
-            __func__, collected);
+    // pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
+    //         __func__, collected);
     
     /* Second pass: process pages - check references and reclaim */
     list_for_each_entry_safe(m, tmp, &process_list, lru) {
@@ -586,8 +587,8 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
             m->on_lru = true;
             spin_unlock_irqrestore(&replica_lru_lock, flags);
             put_page_replica_meta(m);
-            pr_info("[%s] Promoted referenced page %p back to active\n", 
-                __func__, m->page);
+            // pr_info("[%s] Promoted referenced page %p back to active\n", 
+            //     __func__, m->page);
                 continue;
             }
         

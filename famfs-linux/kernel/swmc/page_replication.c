@@ -726,6 +726,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
     while (freed < nr_to_scan) {
+        aged = 0;
 
         /* Step 1: Check if inactive list has enough pages for direct reclaim */
         spin_lock_irqsave(&replica_lru_lock, flags);
@@ -733,8 +734,8 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         active_len = __replica_list_len(&replica_active_lru);
         spin_unlock_irqrestore(&replica_lru_lock, flags);
 
-        if (!inactive_len && !active_len) {
-            pr_info("[%s] Both inactive and active lists are empty, nothing to reclaim\n", __func__);
+        if ( (active_len + inactive_len) < (nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) ) {
+            pr_info("[%s] Both inactive and active are not enough\n", __func__);
             break;
         }
         

@@ -754,7 +754,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
             aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
             spin_lock_irqsave(&replica_lru_lock, flags);
-            active_len = __replica_list_len(&active_len);
+            active_len = __replica_list_len(&replica_active_lru);
             spin_unlock_irqrestore(&replica_lru_lock, flags);
             if (!active_len) {
                 pr_info("[%s] Active list is empty, cannot age more\n", __func__);

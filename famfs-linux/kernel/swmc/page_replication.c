@@ -715,54 +715,67 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
 {
     unsigned long nr_to_scan = sc->nr_to_scan ? sc->nr_to_scan : REPLICA_DEFAULT_SCAN_PAGES;
     unsigned long flags;
-    unsigned long inactive_len, freed = 0;
+    unsigned long inactive_len;
     unsigned long active_len;
     bool age_again = true;
+    unsigned long freed = 0;
     unsigned int aged = 0;
     unsigned int age_mult = 1;
+    unsigned int free_mult = 1;
     
     pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
-    /* Step 1: Check if inactive list has enough pages for direct reclaim */
-    spin_lock_irqsave(&replica_lru_lock, flags);
-    inactive_len = __replica_list_len(&replica_inactive_lru);
-    spin_unlock_irqrestore(&replica_lru_lock, flags);
-    
-    if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-        /* Step 1-1: Direct reclaim from inactive list */
-        freed = replica_reclaim_from_inactive(nr_to_scan);
-        pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
-                __func__, inactive_len, freed);
-        return freed;
-    }
-    
-    /* Step 2: Not enough inactive pages, need to age active pages first */
-    pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
-            __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
-    
-    active_len = __replica_list_len(&replica_active_lru);
-    pr_info("[%s] Active list length: active_len=%lu\n", __func__, active_len);
+    while (freed < nr_to_scan) {
 
-    while (age_again) {
-        aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
-        if (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-            age_mult *= 2;
-            pr_info("[%s] Aged only %u pages, not enough to reclaim. Scan again %lu entries.\n", __func__, aged, nr_to_scan * REPLICA_AGING_MULT * age_mult);
-        } else {
-            pr_info("[%s] Aged %u pages, enough to reclaim\n", __func__, aged);
-            age_again = false;
+        /* Step 1: Check if inactive list has enough pages for direct reclaim */
+        spin_lock_irqsave(&replica_lru_lock, flags);
+        inactive_len = __replica_list_len(&replica_inactive_lru);
+        active_len = __replica_list_len(&replica_active_lru);
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
+
+        if (!inactive_len && !active_len) {
+            pr_info("[%s] Both inactive and active lists are empty, nothing to reclaim\n", __func__);
+            break;
+        }
+        
+        if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            /* Step 1-1: Direct reclaim from inactive list */
+            freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
+            pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
+                    __func__, inactive_len, freed);
+            free_mult *= 2; // double the reclaim size next time
+            continue;
+        }
+        
+        /* Step 2: Not enough inactive pages, need to age active pages first */
+        pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
+                __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
+        
+        while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            active_len = __replica_list_len(&active_len);
+            spin_unlock_irqrestore(&replica_lru_lock, flags);
+            if (!active_len) {
+                pr_info("[%s] Active list is empty, cannot age more\n", __func__);
+                break;
+            }
+            age_mult *= 2; // double the aging size next time
+            pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
+                    __func__, aged, active_len);
+        }
+        
+        /* Step 3: Try reclaim again after aging */
+        spin_lock_irqsave(&replica_lru_lock, flags);
+        inactive_len = __replica_list_len(&replica_inactive_lru);
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
+        
+        if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
+            free_mult *= 2; // double the reclaim size next time
         }
     }
-    
-    /* Step 3: Try reclaim again after aging */
-    spin_lock_irqsave(&replica_lru_lock, flags);
-    inactive_len = __replica_list_len(&replica_inactive_lru);
-    spin_unlock_irqrestore(&replica_lru_lock, flags);
-    
-    if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-        freed = replica_reclaim_from_inactive(nr_to_scan);
-    }
-    
+
     pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
             __func__, aged, inactive_len, freed);
     

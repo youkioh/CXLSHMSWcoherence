@@ -1111,7 +1111,8 @@ famfs_fuse_mmap(struct file *file, struct vm_area_struct *vma)
 	file_accessed(file);
 	vma->vm_ops = &famfs_file_vm_ops;
 	// pr_info("[%s] DEBUG_MAPPING: vma->vm_ops=%p\n", __func__, vma->vm_ops);
-	vm_flags_set(vma, VM_HUGEPAGE | VM_MIXEDMAP);
+	// vm_flags_set(vma, VM_HUGEPAGE);
+	vm_flags_set(vma, VM_NOHUGEPAGE);
 	// pr_info("[%s]: vma->vm_flags=0x%lx\n", __func__, vma->vm_flags);
 	// pr_info("[%s]: vma->vm_file->f_mapping->nrpages=%lu\n", __func__,
 	// 	vma->vm_file->f_mapping->nrpages);

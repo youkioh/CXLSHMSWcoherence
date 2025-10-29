@@ -1762,8 +1762,6 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 
 	// // entry point to the page coherence management code
 	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
-	if (ret == VM_FAULT_RETRY) return ret;
-
     // if (ret) {
 	// 	pr_info("[%s] page_coherence_fault returned with error %d for pfn %lu at addr 0x%lx\n",
 	// 		__func__, ret, pfn_t_to_pfn(pfn), vmf->address);
@@ -1796,6 +1794,10 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	// __func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));
     /* Normal DAX fs insertion path */
 	*entry = dax_insert_entry(xas, vmf, iter, *entry, pfn, entry_flags);
+
+#ifdef CONFIG_PAGE_COHERENCE
+	if (ret == VM_FAULT_RETRY) return ret;
+#endif
 
 	// pr_info("[%s] DEBUG_MAPPING: dax_insert_entry done for pfn %lu at addr 0x%lx, mapping: %p, mapcount: %d\n",
 	// 	__func__, pfn_t_to_pfn(pfn), vmf->address, folio->mapping, folio_mapcount(folio));

@@ -65,6 +65,7 @@ void set_cxl_hdm_base(unsigned long base_addr);
 unsigned long get_cxl_hdm_base(void);
 
 /* page_replication.c */
+struct page *get_replica(struct page *original_page);
 void print_page_info(struct page *page, const char *context);
 bool check_page_replica_dirty(struct page *page_replica);
 struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *src_kaddr);

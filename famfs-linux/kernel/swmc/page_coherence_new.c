@@ -45,8 +45,8 @@
  */
 
 // dummy base PA for CXL HDM 
-static unsigned long cxl_hdm_base;
-pfn_t cxl_hdm_base_pfn;
+static unsigned long cxl_hdm_base = 0x1e80000000; // Default value, can be set by external module
+pfn_t cxl_hdm_base_pfn = pfn_to_pfn_t(cxl_hdm_base >> PAGE_SHIFT);
 
 /**
  * get_cxl_hdm_base - Get the current CXL HDM base address
@@ -174,8 +174,8 @@ static struct kmem_cache *__fault_handle_cache = NULL;
 enum fault_handle_state {
     FH_STATE_RETRY = 0x020,
     FH_STATE_REMOTE = 0x010,
-    FH_STATE_REPLICATED = 0x08,
-    FH_STATE_NEEDWRITE = 0x04,
+    FH_STATE_REPLICATED = 0x08
+    FH_STATE_WRITE = 0x04,
     FH_STATE_MODIFIED = 0x02,
     FH_STATE_SHARED = 0x01
 };
@@ -192,11 +192,11 @@ struct fault_handle {
     struct completion *complete;
 };
 
-#define FH_SET_FLAG(name) \
+#define FH_SET_FLAG(name)\
 static inline void set_##name(struct fault_handle *fh) \
 { (fh)->fh_flags |= FH_STATE_##name; } \
 
-#define FH_CLEAR_FLAG(name) \
+#define FH_CLEAR_FLAG(name)\
 static inline void clear_##name(struct fault_handle *fh) \
 { (fh)->fh_flags &= ~FH_STATE_##name; }
 
@@ -212,7 +212,7 @@ static inline bool is_##name(struct fault_handle *fh) \
 FH_INIT_FLAG(RETRY)
 FH_INIT_FLAG(REMOTE)
 FH_INIT_FLAG(REPLICATED)
-FH_INIT_FLAG(NEEDWRITE)
+FH_INIT_FLAG(WRITE)
 FH_INIT_FLAG(MODIFIED)
 FH_INIT_FLAG(SHARED)
 
@@ -220,7 +220,7 @@ FH_INIT_FLAG(SHARED)
     clear_RETRY(fh); \
     clear_REMOTE(fh); \
     clear_REPLICATED(fh); \
-    clear_NEEDWRITE(fh); \
+    clear_WRITE(fh); \
     clear_MODIFIED(fh); \
     clear_SHARED(fh);
 
@@ -252,7 +252,7 @@ static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 
 static inline bool has_lower_priority(struct fault_handle *fh, bool is_write, long remote_acked_fault_count, int remote_node_id, int local_node_id)
 {
-    bool local_is_write = is_NEEDWRITE(fh);
+    bool local_is_write = is_WRITE(fh);
     long local_acked_count = atomic64_read(&__local_acked_fault_count);
     
     /* READ vs WRITE: WRITE always has higher priority */
@@ -284,23 +284,21 @@ static inline bool has_lower_priority(struct fault_handle *fh, bool is_write, lo
 }
 
 
-static void check_metadata(struct fault_handle *fh)
+static int check_metadata(struct fault_handle *fh)
 {    
-    struct page *page_replica;
-    if (PageShared(fh->original_page)) {
+    if (TestPageShared(fh->original_page)) {
         set_SHARED(fh);
     } else {
         clear_SHARED(fh);
     }
 
-    if (PageModified(fh->original_page)) {
+    if (TestPageModified(fh->original_page)) {
         set_MODIFIED(fh);
     } else {
         clear_MODIFIED(fh);
     }
 
-    page_replica = get_replica(fh->original_page);
-    if (page_replica) {
+    if (page->private) {
         set_REPLICATED(fh);
     } else {
         clear_REPLICATED(fh);
@@ -368,7 +366,7 @@ static const unsigned long fh_action_table[32] = {
     /* R W - S */ FH_ACTION_INVALIDATE | FH_ACTION_RESPOND,
     /* R W M - */ FH_ACTION_INVALIDATE | FH_ACTION_WRITEBACK | FH_ACTION_RESPOND,
     /* R W M S */ FH_ACTION_INVALID,
-};
+}
 
 static void set_fh_action(struct fault_handle *fh) {
     unsigned long fh_action;
@@ -416,16 +414,16 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
     }
 
     if (found) {
-        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, current->pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
+        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
         DECLARE_COMPLETION_ONSTACK(complete);
         fh->complete = &complete;
 
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
         wait_for_completion(&complete);
-        pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, current->pid);
+        pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, pid);
 
-        if (is_NEEDWRITE(fh)) {
+        if (is_WRITE(fh)) {
             pr_info("[Info]%s: Fault handling for pfn=0x%lx needs to be redone to release DAX entry lock\n",
                     __func__, original_pfn_val);
             hlist_del_init(&fh->list);
@@ -446,7 +444,7 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
     
     /* Clear & update flags */
     FH_CLEAR_FLAG_ALL(fh);
-    is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
+    is_write ? set_WRITE(fh) : clear_WRITE(fh);
     check_metadata(fh);
     set_fh_action(fh);
 
@@ -614,186 +612,12 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
     return false;
 }
 
-static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
-{
-    struct wait_station *ws;
-    int ret;
-    struct payload_data payload;
-    int node_count;
-    unsigned long cxl_hdm_offset;
-
-    // Get CXL HDM offset for this fault
-    cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
-    node_count = swmc_kmsg_node_count();
-
-    payload.cxl_hdm_offset = cxl_hdm_offset;
-    payload.page_order = order;
-    payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
-
-    // register wait station for this fault
-    ws = get_wait_station_multiple(current, node_count - 1);
-    if (!ws) {
-        pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        return -ENOMEM;
-    }
-    
-    // broadcast message
-    ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
-    if (ret) {
-        pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
-               msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
-        // Continue anyway for now - could implement fallback
-    }
-
-    void *wait_result = wait_at_station(ws);
-    pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
-            msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
-    
-    if (wait_result == (void *)-1) {
-        pr_info("[Info]%s: Received NACK for %s message, aborting operation\n", __func__,
-        msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
-        return -EAGAIN; // Indicate operation should be retried or aborted
-    } else if (IS_ERR(wait_result)) {
-        ret = PTR_ERR(wait_result);
-        pr_info("[Info]%s: Failed to wait at station: %d\n", __func__, ret);
-        return ret;
-    }
-
-    return 0;
-}
-
-struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
-{
-    struct wait_station *ws;
-    int ret;
-    struct payload_data payload;
-    int node_count;
-    unsigned long cxl_hdm_offset;
-
-    // Get CXL HDM offset for this fault
-    cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
-    node_count = swmc_kmsg_node_count();
-
-    payload.cxl_hdm_offset = cxl_hdm_offset;
-    payload.page_order = order;
-    payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
-
-    // register wait station for this fault
-    ws = get_wait_station_multiple(current, node_count - 1);
-    if (!ws) {
-        pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        return NULL;
-    }
-    
-    // broadcast message
-    ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
-    if (ret) {
-        pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
-               msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
-        // Continue anyway for now - could implement fallback
-    }
-
-    return ws;
-}
-
-// TODO: Implement this function
-// 여기서 transaction을 완료하고, coherence를 맞추기 위한 cache나 page에 대한 flush, fetch 등의 작업까지 담당한다.
-static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr)
-{
-    int ret;
-    
-    /* broadcast fetch/invalidate message and wait for ACKs */
-    // Get Shared
-    if (!is_NEEDWRITE(fh) && !is_SHARED(fh) && !is_MODIFIED(fh)) {
-        ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
-        pr_info("[Info]%s: Issuing GetS transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-    }
-
-    // Get Modified
-    if (is_NEEDWRITE(fh) && !is_MODIFIED(fh)) {
-        ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, pfn_to_pfn_t(fh->original_pfn_val), 0);
-        pr_info("[Info]%s: Issuing GetM/Upgrade transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-    }
-
-    // if NACK recieved, return -EAGAIN to indicate retry is needed
-    if (ret == -EAGAIN) {
-        pr_info("[Info]%s: Transaction for pfn=0x%lx needs to be retried due to NACK\n", __func__, fh->original_pfn_val);
-        return -EAGAIN;
-    } else if (ret) {
-        pr_err("[Err]%s: Transaction for pfn=0x%lx failed with error %d\n", __func__, fh->original_pfn_val, ret);
-        return ret;
-    }
-
-    /* Manage page replica if needed */
-    if (is_REPLICATED(fh) && !is_SHARED(fh)) {
-        // TODO: Fetch page replica from original page
-        // ret = fetch_page_replica(fh->original_page, kaddr);
-    }
-
-    return 0;
-}
-
-
-static int issue_page_coherence_transaction_async(struct fault_handle *fh)
-{   
-    struct wait_station *ws;
-    int ret;
-
-    //broadcast fetch message without waiting for ACKs
-    ws = broadcast_message(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
-    if (!ws) {
-        pr_err("[Err]%s: Failed to broadcast fetch message for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-        return -ENOMEM;
-    }
-
-    ws->async_page = fh->original_page;
-
-    return 0;
-}
-
-// TODO: Implement this function
-static void update_metadata(struct fault_handle *fh)
-{
-    if (is_REPLICATED(fh)) {
-        if (is_NEEDWRITE(fh)) {
-            SetPageModified(fh->original_page);
-            ClearPageShared(fh->original_page);
-        } else { // Shared state
-            SetPageShared(fh->original_page);
-            ClearPageModified(fh->original_page);
-        }
-    } else {
-        if (is_NEEDWRITE(fh)) {
-            SetPageModified(fh->original_page);
-            ClearPageShared(fh->original_page);
-        } else { // Shared stale state
-            SetPageModified(fh->original_page);
-            SetPageShared(fh->original_page);
-        }
-    }
-}
-
-static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
-{
-    pfn_t pfn_to_map;
-    struct page *page_replica;
-    if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
-        pfn_to_map.val = page_to_pfn(page_replica) | 
-                         (fh->original_pfn_val & PFN_FLAGS_MASK);
-    } else {
-        pfn_to_map.val = fh->original_pfn_val;
-    }
-
-    *pfn = pfn_to_map;
-}
-
 // Ring buffer to handle async transaction completions
 #define ASYNC_TRANSACTION_RING_SIZE 1024
 struct async_transaction_work {
     struct page *original_page;
     bool nacked;
-};
+}
 
 static struct async_transaction_work async_transaction_workqueue[ASYNC_TRANSACTION_RING_SIZE];
 atomic_t async_transaction_workqueue_head = ATOMIC_INIT(0);
@@ -812,7 +636,7 @@ static void async_transaction_daemon(void)
                 // TODO: resend fetch message
             }
             // Process completion
-            pr_info("[Info]%s: Processing async transaction completion for original_page=%p\n", __func__, work_page);
+            pr_info("[Info]%s: Processing async transaction completion for original_page=%p\n", __func__, comp->original_page);
                         
             // flush cache lines of the page to eliminate stale data in CPU caches
             volatile char *kaddr = kmap(work_page);
@@ -825,7 +649,7 @@ static void async_transaction_daemon(void)
             ClearPageModified(work_page);
 
             // Advance tail
-            atomic_inc(&async_transaction_workqueue_tail);
+            atomic_inc(&async_transaction_ring_tail);
         } else {
             // Sleep for a while
             msleep(10);
@@ -867,7 +691,7 @@ static void writeback_page(struct fault_handle *fh)
         // For non-replicated page, just flush cache lines and clear modified flag
         volatile char *kaddr = kmap(fh->original_page);
         for (int i = 0; i < PAGE_SIZE; i += CL_SIZE) {
-            clflush((volatile void *)&kaddr[i]);
+            clflush((volatile void *)&kaddr[i]));
         }
         kunmap(fh->original_page);
     }
@@ -878,7 +702,7 @@ static void writeback_page(struct fault_handle *fh)
     unsigned long index, end;
     struct page *page_replica = NULL;
     if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
+        page_replica = fh->original_page->private;
         pfn_to_clean = page_to_pfn(page_replica);
         index = page_replica->index;
         mapping = page_replica->mapping;
@@ -906,7 +730,7 @@ static void invalidate_page(struct fault_handle *fh)
     unsigned long index;
     struct page *page_replica = NULL;
     if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
+        page_replica = fh->original_page->private;
         pfn_to_clean = page_to_pfn(page_replica);
         index = page_replica->index;
         mapping = page_replica->mapping;
@@ -1070,6 +894,184 @@ static int swmc_kmsg_handle_error(struct swmc_kmsg_message *msg)
 /* =============================================================================
  * PAGE COHERENCE FAULT HANDLING
  * ============================================================================= */
+ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
+/* Helper function to handle messaging operations */
+{
+    struct wait_station *ws;
+    int ret;
+    struct payload_data payload;
+    int node_count;
+    unsigned long cxl_hdm_offset;
+
+    // Get CXL HDM offset for this fault
+    cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
+    node_count = swmc_kmsg_node_count();
+
+    payload.cxl_hdm_offset = cxl_hdm_offset;
+    payload.page_order = order;
+    payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
+
+    // register wait station for this fault
+    ws = get_wait_station_multiple(current, node_count - 1);
+    if (!ws) {
+        pr_info("[Info]%s: Failed to get wait station\n", __func__);
+        return -ENOMEM;
+    }
+    
+    // broadcast message
+    ret = swmc_kmsg_broadcast(msg_type, ws->id, payload);
+    if (ret) {
+        pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
+               msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
+        // Continue anyway for now - could implement fallback
+    }
+
+    void *wait_result = wait_at_station(ws);
+    pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
+            msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
+    
+    if (wait_result == (void *)-1) {
+        pr_info("[Info]%s: Received NACK for %s message, aborting operation\n", __func__,
+        msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
+        return -EAGAIN; // Indicate operation should be retried or aborted
+    } else if (IS_ERR(wait_result)) {
+        ret = PTR_ERR(wait_result);
+        pr_info("[Info]%s: Failed to wait at station: %d\n", __func__, ret);
+        return ret;
+    }
+
+    return 0;
+}
+
+struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
+{
+    struct wait_station *ws;
+    int ret;
+    struct payload_data payload;
+    int node_count;
+    unsigned long cxl_hdm_offset;
+
+    // Get CXL HDM offset for this fault
+    cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
+    node_count = swmc_kmsg_node_count();
+
+    payload.cxl_hdm_offset = cxl_hdm_offset;
+    payload.page_order = order;
+    payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
+
+    // register wait station for this fault
+    ws = get_wait_station_multiple(current, node_count - 1);
+    if (!ws) {
+        pr_info("[Info]%s: Failed to get wait station\n", __func__);
+        return NULL;
+    }
+    
+    // broadcast message
+    ret = swmc_kmsg_broadcast(msg_type, ws->id, payload);
+    if (ret) {
+        pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
+               msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
+        // Continue anyway for now - could implement fallback
+    }
+
+    return ws;
+}
+
+/*
+ * GetS: - X - - -
+ * GetM: - X W - -
+ * Upgrade: - X W - S
+ */
+
+// TODO: Implement this function
+// 여기서 transaction을 완료하고, coherence를 맞추기 위한 cache나 page에 대한 flush, fetch 등의 작업까지 담당한다.
+static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr)
+{
+    int ret;
+    
+    /* broadcast fetch/invalidate message and wait for ACKs */
+    // Get Shared
+    if (!is_WRITE(fh) && !is_SHARED(fh) && !is_MODIFIED(fh)) {
+        ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
+        pr_info("[Info]%s: Issuing GetS transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    }
+
+    // Get Modified
+    if (is_WRITE(fh) && !is_MODIFIED(fh)) {
+        ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, pfn_to_pfn_t(fh->original_pfn_val), 0);
+        pr_info("[Info]%s: Issuing GetM/Upgrade transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    }
+
+    // if NACK recieved, return -EAGAIN to indicate retry is needed
+    if (ret == -EAGAIN) {
+        pr_info("[Info]%s: Transaction for pfn=0x%lx needs to be retried due to NACK\n", __func__, fh->original_pfn_val);
+        return -EAGAIN;
+    } else if (ret) {
+        pr_err("[Err]%s: Transaction for pfn=0x%lx failed with error %d\n", __func__, fh->original_pfn_val, ret);
+        return ret;
+    }
+
+    /* Manage page replica if needed */
+    if (is_REPLICATED(fh) && !is_SHARED(fh)) {
+        // TODO: Fetch page replica from original page
+        ret = fetch_page_replica(fh->original_page, kaddr);
+    }
+
+    return 0;
+}
+
+
+static int issue_page_coherence_transaction_async(struct fault_handle *fh, void *kaddr)
+{   
+    struct wait_station *ws;
+    int ret;
+
+    //broadcast fetch message without waiting for ACKs
+    ws = broadcast_message(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
+    if (!ws) {
+        pr_err("[Err]%s: Failed to broadcast fetch message for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        return -ENOMEM;
+    }
+
+    ws->async_page = fh->original_page;
+
+    return 0;
+}
+
+// TODO: Implement this function
+static void update_metadata(struct fault_handle *fh)
+{
+    if (is_REPLICATED(fh)) {
+        if (is_WRITE(fh)) {
+            SetPageModified(fh->replica_page);
+            ClearPageShared(fh->replica_page);
+        } else { // Shared state
+            SetPageShared(fh->replica_page);
+            ClearPageModified(fh->replica_page);
+        }
+    } else {
+        if (is_WRITE(fh)) {
+            SetPageModified(fh->replica_page);
+            ClearPageShared(fh->replica_page);
+        } else { // Shared stale state
+            SetPageModified(fh->replica_page);
+            SetPageShared(fh->replica_page);
+        }
+    }
+}
+
+static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
+{
+    pfn_t pfn_to_map;
+    if (is_REPLICATED(fh)) {
+        pfn_to_map.val = page_to_pfn(fh->replica_page) | 
+                         (fh->original_pfn_val & PFN_FLAGS_MASK);
+    } else {
+        pfn_to_map.val = fh->original_pfn_val;
+    }
+
+    *pfn = pfn_to_map;
+}
 
 
 /**
@@ -1139,7 +1141,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Issue Transaction */
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION) {
-        ret = issue_page_coherence_transaction(fh, kaddr);
+        ret = issue_page_coherence_transaction(fh);
         if (ret) {
             pr_err("[Err]%s: Failed to issue page coherence transaction\n", __func__);
             __finish_local_fault_handling(fh);
@@ -1180,9 +1182,6 @@ int __init page_coherence_init(void)
     int ret;
     int i;
     
-    cxl_hdm_base = 0x1e80000000; // Default value, can be set by external module
-    cxl_hdm_base_pfn = pfn_to_pfn_t(cxl_hdm_base >> PAGE_SHIFT);
-
     pr_info("[Info]%s: Initializing page coherence subsystem\n", __func__);
 
     // Initialize fault handle cache

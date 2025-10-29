@@ -127,6 +127,9 @@ enum pageflags {
 #ifdef CONFIG_ARCH_USES_PG_ARCH_3
 	PG_arch_3,
 #endif
+#ifdef CONFIG_PAGE_COHERENCE
+	PG_coherence, // for indicating SWMC managed page
+#endif
 	__NR_PAGEFLAGS,
 
 	PG_readahead = PG_reclaim,
@@ -188,6 +191,17 @@ enum pageflags {
 	PG_has_hwpoisoned = PG_active,
 	PG_large_rmappable = PG_workingset, /* anon or file-backed */
 	PG_partially_mapped = PG_reclaim, /* was identified to be partially mapped */
+
+#ifdef CONFIG_PAGE_COHERENCE
+	/*
+	 * Invalid = PG_shared = PG_modified = 0
+	 * Shared = PG_shared = 1, PG_modified = 0
+	 * Modified = PG_shared = 0, PG_modified = 1
+	 * Shared but stale = PG_shared = 1, PG_modified = 1
+	 */
+	PG_shared = PG_owner_priv_1,
+	PG_modified = PG_owner_2,
+#endif
 };
 
 #define PAGEFLAGS_MASK		((1UL << NR_PAGEFLAGS) - 1)
@@ -642,6 +656,12 @@ __PAGEFLAG(Reported, reported, PF_NO_COMPOUND)
 PAGEFLAG(VmemmapSelfHosted, vmemmap_self_hosted, PF_ANY)
 #else
 PAGEFLAG_FALSE(VmemmapSelfHosted, vmemmap_self_hosted)
+#endif
+
+#ifdef CONFIG_PAGE_COHERENCE
+PAGEFLAG(Coherence, coherence, PF_ANY)
+PAGEFLAG(Shared, shared, PF_ANY)
+PAGEFLAG(Modified, modified, PF_ANY)
 #endif
 
 /*

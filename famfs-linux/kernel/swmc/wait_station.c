@@ -30,6 +30,7 @@ struct wait_station *get_wait_station_multiple(struct task_struct *tsk, int coun
 
 	ws->id = id;
 	ws->pid = tsk->pid;
+	ws->async_page = NULL;
 	ws->private = (void *)0xbad0face;
 	init_completion(&ws->pendings);
 	atomic_set(&ws->pendings_count, count);

@@ -8,6 +8,7 @@ struct wait_station {
 	int id; // wait station ID
 	pid_t pid;
 	volatile void *private;
+	struct page *async_page; // indicate whether the wait station is for async transaction
 	struct completion pendings;
 	atomic_t pendings_count;
 };

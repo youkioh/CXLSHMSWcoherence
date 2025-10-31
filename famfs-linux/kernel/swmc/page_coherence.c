@@ -449,8 +449,9 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
     is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
     set_fh_action(fh);
-
+    
     spin_unlock_irqrestore(&faults_lock[fk], flags);
+    pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
 
     return fh;
@@ -776,15 +777,13 @@ static void update_metadata(struct fault_handle *fh)
 static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
 {
     pfn_t pfn_to_map;
+    pfn_t original_pfn = *pfn;
     struct page *page_replica;
-    if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
-        pfn_to_map.val = page_to_pfn(page_replica) | 
-                         (fh->original_pfn_val & PFN_FLAGS_MASK);
-    } else {
-        pfn_to_map.val = fh->original_pfn_val;
-    }
 
+    pr_info("[Info]%s: Mapping VPN to replica PFN for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    page_replica = get_replica(fh->original_page);
+    pfn_to_map.val = page_to_pfn(page_replica) | 
+                        (original_pfn & PFN_FLAGS_MASK);
     *pfn = pfn_to_map;
 }
 
@@ -801,6 +800,7 @@ atomic_t async_transaction_workqueue_tail = ATOMIC_INIT(0);
 
 static void async_transaction_daemon(void)
 {
+    pr_info("[Info]%s: Async transaction daemon started\n", __func__);
     while (!kthread_should_stop()) {
         int head = atomic_read(&async_transaction_workqueue_head);
         int tail = atomic_read(&async_transaction_workqueue_tail);
@@ -812,7 +812,7 @@ static void async_transaction_daemon(void)
                 // TODO: resend fetch message
             }
             // Process completion
-            pr_info("[Info]%s: Processing async transaction completion for original_page=%p\n", __func__, work_page);
+            pr_info("[Info]%s: Processing async transaction completion for original_pfn=0x%lx\n", __func__, page_to_pfn(work_page));
                         
             // flush cache lines of the page to eliminate stale data in CPU caches
             volatile char *kaddr = kmap(work_page);
@@ -1125,6 +1125,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     /* Check Metadata & get fault handle */
     fh = __start_local_fault_handling(original_pfn, write);
     SetPageCoherence(fh->original_page);
+    pr_info("[Info]%s: PG_coherence = %d for original_page=%p\n", __func__, PageCoherence(fh->original_page), fh->original_page);
 
     if (!fh) {
         pr_err("[Err]%s: Failed to allocate new fault handle\n", __func__);
@@ -1139,6 +1140,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Issue Transaction */
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION) {
+        pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction(fh, kaddr);
         if (ret) {
             pr_err("[Err]%s: Failed to issue page coherence transaction\n", __func__);
@@ -1146,6 +1148,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
             return ret;
         }
     } else if (fh->fh_action & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
+        pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
         if (ret) {
             pr_err("[Err]%s: Failed to issue async page coherence transaction\n", __func__);
@@ -1155,11 +1158,16 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     /* Update metadata */
-    if (fh->fh_action & FH_ACTION_UPDATE_METADATA)
+    if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
+        pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         update_metadata(fh);
+    }
 
+    pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
-    map_vpn_to_pfn(fh, pfn);
+    if (is_REPLICATED(fh)) {
+        map_vpn_to_pfn(fh, pfn);
+    }
 
     /* Finish local fault handling */
     if (__finish_local_fault_handling(fh)) {
@@ -1167,6 +1175,8 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         msleep(1);
         return VM_FAULT_RETRY;
     }
+
+    pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, fh->original_pfn_val, pfn_t_to_pfn(*pfn));
     return 0;
 }
 

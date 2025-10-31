@@ -182,6 +182,8 @@ struct page *get_replica(struct page *original_page)
 {
     struct page *replica;
     replica = original_page->private;
+    print_page_info(original_page, "original_page in get_replica");
+    pr_info("[Info]%s: original_page=0x%lx, private=0x%lx\n", __func__, (unsigned long)original_page, (unsigned long)replica);
     if (!replica)
         return NULL;
     else if ((unsigned long) replica & 0x1UL) // if replica's LSB is 1, it means private is used to store page access count

@@ -24,8 +24,31 @@
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
 
+// For PEBS
+#include <linux/perf_event.h>
+#include "../kernel/events/internal.h"
+
+static LIST_HEAD(replica_active_lru);
+static LIST_HEAD(replica_inactive_lru);
+static DEFINE_SPINLOCK(replica_lru_lock);
+static DEFINE_XARRAY(replica_meta_xa);
+
+/* XArrays for page mapping */
+static DEFINE_XARRAY(original_to_replica_xa);
+static DEFINE_XARRAY(replica_to_original_xa);
+
+/* Constants for replica management */
+#define MAX_ALLOCATE_RETRIES             3
+#define REPLICA_DEFAULT_SCAN_PAGES      1024
+#define REPLICA_INACTIVE_THRESHOLD_MULT 2
+#define REPLICA_AGING_MULT              4
+#define REPLICA_ACTIVE_TO_INACTIVE_RATIO 4  /* 1/4 of active pages count for shrinking */
+#define REPLICA_MAX_LIST_COUNT          (1UL << 20)
+#define CL_SIZE                        64 /* Cache line size for flushing */
+
+
 /* =============================================================================
- * SYSFS INTERFACE FOR PAGE REPLICATION STATISTICS
+ * sysfs interface for page replication statistics
  * ============================================================================= */
 
 /* Page allocation tracking */
@@ -95,9 +118,7 @@ static inline void track_page_free(unsigned int order)
              __func__, order, pages, atomic64_read(&page_replica_allocated_pages));
 }
 
-
-
-
+/* Utility function for debugging */
 void print_page_info(struct page *page, const char *context)
 {
     pr_info("[%s] page_info in '%s': page=%p, flags=0x%lx, mapping=%p, index=%lu, refcount=%d\n",
@@ -112,26 +133,10 @@ void print_page_info(struct page *page, const char *context)
 }
 EXPORT_SYMBOL(print_page_info);
 
-static LIST_HEAD(replica_active_lru);
-static LIST_HEAD(replica_inactive_lru);
-static DEFINE_SPINLOCK(replica_lru_lock);
-static DEFINE_XARRAY(replica_meta_xa);
 
-/* XArrays for page mapping */
-static DEFINE_XARRAY(original_to_replica_xa);
-static DEFINE_XARRAY(replica_to_original_xa);
-
-/* Constants for replica management */
-#define MAX_ALLOCATE_RETRIES             3
-#define REPLICA_DEFAULT_SCAN_PAGES      1024
-#define REPLICA_INACTIVE_THRESHOLD_MULT 2
-#define REPLICA_AGING_MULT              4
-#define REPLICA_ACTIVE_TO_INACTIVE_RATIO 4  /* 1/4 of active pages count for shrinking */
-#define REPLICA_MAX_LIST_COUNT          (1UL << 20)
-#define CL_SIZE                        64 /* Cache line size for flushing */
 
 /* ========================================================================
- * Walk page mapping helpers
+ * Page reference checking utilities
  * ======================================================================== */
 static int pte_entry_young_and_clear(pte_t *pte, unsigned long addr, unsigned long next, struct mm_walk *walk)
 {
@@ -171,965 +176,1250 @@ static const struct mm_walk_ops young_and_clear_ops = {
     .pte_entry = pte_entry_young_and_clear,
     .pmd_entry = pmd_entry_young_and_clear,
 };
-
 /* ========================================================================
- * page coherence meta management
+ * LRU management utilities
  * ======================================================================== */
 
-#define PAGE_ACESS_COUNT_MASK  (~0x1UL)
-
-struct page *get_replica(struct page *original_page)
+static void __replica_lru_add_active(struct page *page_replica)
 {
-    struct page *replica;
-    replica = original_page->private;
-    print_page_info(original_page, "original_page in get_replica");
-    pr_info("[Info]%s: original_page=0x%lx, private=0x%lx\n", __func__, (unsigned long)original_page, (unsigned long)replica);
-    if (!replica)
-        return NULL;
-    else if ((unsigned long) replica & 0x1UL) // if replica's LSB is 1, it means private is used to store page access count
-        return NULL;
-    return replica;
+    list_add(&page_replica->lru, &replica_active_lru);
 }
-// /* ========================================================================
-//  * LRU management utilities
-//  * ======================================================================== */
 
-// static void __replica_lru_add_active(struct page *page_replica)
-// {
-//     list_add(&page_replica->lru, &replica_active_lru);
-// }
+static void __replica_lru_move_to_active_mru(struct page *page_replica)
+{
+    list_move(&page_replica->lru, &replica_active_lru);
+}
 
-// static void __replica_lru_move_to_active_mru(struct page *page_replica)
-// {
-//     list_move(&page_replica->lru, &replica_active_lru);
-// }
+static void __replica_lru_move_to_inactive_mru(struct page *page_replica)
+{
+    list_move(&page_replica->lru, &replica_inactive_lru);
+}
 
-// static void __replica_lru_move_to_inactive_mru(struct page *page_replica)
-// {
-//     list_move(&page_replica->lru, &replica_inactive_lru);
-// }
+static void __replica_lru_del(struct page *page_replica)
+{
+    list_del_init(&page_replica->lru);
+}
 
-// static void __replica_lru_del(struct page *page_replica)
-// {
-//     list_del_init(&page_replica->lru);
-// }
+static int insert_replica_lru(struct page *page_replica)
+{
+    unsigned long flags;
 
-// static int insert_replica_lru(struct page *page_replica)
-// {
-//     unsigned long flags;
+    INIT_LIST_HEAD(&page_replica->lru);
 
-//     get_page(page_replica); // Increment reference count
-//     INIT_LIST_HEAD(&m->lru);
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    __replica_lru_add_active(page_replica);
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+    return 0;
+}
 
-//     spin_lock_irqsave(&replica_lru_lock, flags);
-//     __replica_lru_add_active(page_replica);
-//     spin_unlock_irqrestore(&replica_lru_lock, flags);
-//     return 0;
-// }
-
-// /* Helper to remove page from LRU during error cleanup */
-// static void remove_replica_lru(struct page *page_replica)
-// {
-//     unsigned long flags;
-
-//     put_page(page); // Decrement reference count
+/* Helper to remove page from LRU during error cleanup */
+static void remove_replica_lru(struct page *page_replica)
+{
+    unsigned long flags;
     
-//     spin_lock_irqsave(&replica_lru_lock, flags);
-//     __replica_lru_del(page_replica);
-//     spin_unlock_irqrestore(&replica_lru_lock, flags);
-// }
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    __replica_lru_del(page_replica);
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+}
 
-// static bool check_page_replica_referenced_and_clear(struct page *page_replica)
-// {
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return false;
-//     }
-//     unsigned long reference_count = 0;
+static bool check_page_replica_referenced_and_clear(struct page *page_replica)
+{
+    if (!page_replica) {
+        pr_err("[%s] Invalid page replica pointer\n", __func__);
+        return false;
+    }
+    unsigned long reference_count = 0;
 
-//     struct address_space *mapping = page_replica->mapping;
-//     pgoff_t start_index = page_replica->index;
+    struct address_space *mapping = page_replica->mapping;
+    pgoff_t start_index = page_replica->index;
 
-//     if (!mapping) {
-//         pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
-//         return false;
-//     }
+    if (!mapping) {
+        pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
+        return false;
+    }
 
-//     i_mmap_lock_read(mapping);
+    i_mmap_lock_read(mapping);
 
-//     // 락을 잡은 후 매핑 재검사
-//     if (page_replica->mapping != mapping) {
-//         pr_warn("[%s] Mapping changed during processing, unlocking and returning\n", __func__);
-//         i_mmap_unlock_read(mapping);
-//         return false;
-//     }
+    // 락을 잡은 후 매핑 재검사
+    if (page_replica->mapping != mapping) {
+        pr_warn("[%s] Mapping changed during processing, unlocking and returning\n", __func__);
+        i_mmap_unlock_read(mapping);
+        return false;
+    }
 
-//     int ret = walk_page_mapping(mapping, start_index, 1, &young_and_clear_ops, &reference_count);
+    int ret = walk_page_mapping(mapping, start_index, 1, &young_and_clear_ops, &reference_count);
 
-//     i_mmap_unlock_read(mapping);
+    i_mmap_unlock_read(mapping);
 
-//     if (ret < 0) { // if ret is negetive, it's an error code
-//         pr_err("[%s] Failed to walk page mapping for page replica %p: %d\n", __func__, page_replica, ret);
-//         return false;
-//     }
+    if (ret < 0) { // if ret is negetive, it's an error code
+        pr_err("[%s] Failed to walk page mapping for page replica %p: %d\n", __func__, page_replica, ret);
+        return false;
+    }
 
-//     if ((unsigned long)reference_count > 0) {
-//         // pr_info("[%s] Page replica %p is referenced, count=%lu\n", __func__, page_replica, (unsigned long)reference_count);
-//         return true;
-//     } else {
-//         // pr_info("[%s] Page replica %p is not referenced\n", __func__, page_replica);
-//         return false;
-//     }
-// }
+    if ((unsigned long)reference_count > 0) {
+        // pr_info("[%s] Page replica %p is referenced, count=%lu\n", __func__, page_replica, (unsigned long)reference_count);
+        return true;
+    } else {
+        // pr_info("[%s] Page replica %p is not referenced\n", __func__, page_replica);
+        return false;
+    }
+}
 
-// /* ========================================================================
-//  * Linux-style LRU implementation 
-//  * ======================================================================== */
+/* ========================================================================
+ * Linux-style LRU implementation 
+ * ======================================================================== */
 
-// /**
-//  * replica_reclaim_from_inactive - Reclaim pages from inactive list (Linux vmscan style)
-//  * @nr: Number of pages to attempt to reclaim
-//  *
-//  * This function implements Linux-style reclaim from inactive list:
-//  * - Takes pages from TAIL (LRU) of inactive list
-//  * - Referenced pages get moved back to active list MRU
-//  * - Non-referenced pages get unmapped and freed
-//  */
-// static unsigned long replica_reclaim_from_inactive(unsigned long nr)
-// {
-//     unsigned long flags;
-//     unsigned long collected = 0, aged = 0;
-//     struct page *page_replica, *tmp_page;
-//     struct list_head process_list;
+int flush_page_replica(struct page *page_replica);
+
+/**
+ * replica_reclaim_from_inactive - Reclaim pages from inactive list (Linux vmscan style)
+ * @nr: Number of pages to attempt to reclaim
+ *
+ * This function implements Linux-style reclaim from inactive list:
+ * - Takes pages from TAIL (LRU) of inactive list
+ * - Referenced pages get moved back to active list MRU
+ * - Non-referenced pages get unmapped and freed
+ */
+static unsigned long replica_reclaim_from_inactive(unsigned long nr)
+{
+    unsigned long flags;
+    unsigned long collected = 0, aged = 0;
+    unsigned long freed = 0;
+    struct page *page_replica, *tmp_page;
+    struct list_head process_list;
     
-//     INIT_LIST_HEAD(&process_list);
+    INIT_LIST_HEAD(&process_list);
     
-//     /* First pass: collect pages from tail (LRU) of inactive list */
-//     spin_lock_irqsave(&replica_lru_lock, flags);
-//     list_for_each_entry_safe_reverse(page_replica, tmp_page, &replica_inactive_lru, lru) {
-//         if (collected >= nr)
-//             break;
+    /* First pass: collect pages from tail (LRU) of inactive list */
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    list_for_each_entry_safe_reverse(page_replica, tmp_page, &replica_inactive_lru, lru) {
+        if (collected >= nr)
+            break;
         
-//         list_move(&page_replica->lru, &process_list);
-//         collected++;
-//     }
-//     spin_unlock_irqrestore(&replica_lru_lock, flags);
+        list_move(&page_replica->lru, &process_list);
+        collected++;
+    }
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
     
-//     // pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
-//     //         __func__, collected);
+    pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
+            __func__, collected);
     
-//     /* Second pass: process pages - check references and reclaim */
-//     list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
-//         bool refd;
-//         int ret;
+    /* Second pass: process pages - check references and reclaim */
+    list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
+        bool refd;
+        int ret;
         
-//         /* Check if referenced (last chance for inactive pages) */
-//         refd = check_page_replica_referenced_and_clear(page);
+        /* Check if referenced (last chance for inactive pages) */
+        refd = check_page_replica_referenced_and_clear(page_replica);
         
-//         if (refd) {
-//             /* Referenced - promote back to active list MRU */
-//             spin_lock_irqsave(&replica_lru_lock, flags);
-//             __replica_lru_move_to_active_mru(page_replica);
-//             spin_unlock_irqrestore(&replica_lru_lock, flags);
-//             continue;
-//         }
+        if (refd) {
+            /* Referenced - promote back to active list MRU */
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            __replica_lru_move_to_active_mru(page_replica);
+            spin_unlock_irqrestore(&replica_lru_lock, flags);
+            continue;
+        }
         
-//         ret = __flush_page_replica(m->page);
-        
-//         if (ret == REPLICA_SUCCESS) {
-//             freed++;
-//             pr_debug("[%s] Successfully reclaimed page %p (pfn=0x%lx)\n", 
-//                     __func__, page_replica, page_to_pfn(m->page));
-//         } else {
-//             pr_err("[%s] Failed to flush page replica %p: %d\n", 
-//                     __func__, page_replica, ret);
-//             /* On failure, reinsert to inactive list MRU */
-//             spin_lock_irqsave(&replica_lru_lock, flags);
-//             __replica_lru_move_to_inactive_mru(page_replica);
-//             spin_unlock_irqrestore(&replica_lru_lock, flags);
-//         }
-//     }
-    
-//     pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
-//     return freed;
-// }
+        ret = flush_page_replica(page_replica);
 
-// /**
-//  * replica_age_active_to_inactive - Age pages from active to inactive list
-//  * @nr: Number of pages to scan for aging
-//  *
-//  * Linux-style aging:
-//  * - Takes pages from TAIL (LRU) of active list  
-//  * - Referenced pages stay in active list MRU
-//  * - Non-referenced pages move to inactive list MRU
-//  */
-// static unsigned int replica_age_active_to_inactive(unsigned long nr)
-// {
-//     unsigned long flags;
-//     unsigned long collected = 0, aged = 0;
-//     struct page *page_replica, *tmp_page;
-//     struct list_head process_list;
+        if (ret < 0) {
+            pr_err("[Err]%s: Failed to flush page replica %p: %d\n", 
+                    __func__, page_replica, ret);
+            /* On failure, reinsert to inactive list MRU */
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            __replica_lru_move_to_inactive_mru(page_replica);
+            spin_unlock_irqrestore(&replica_lru_lock, flags);
+            continue;
+        }
+        freed++;
+    }
     
-//     INIT_LIST_HEAD(&process_list);
-    
-//     /* First pass: collect pages from tail (LRU) of active list */
-//     spin_lock_irqsave(&replica_lru_lock, flags);
-//     list_for_each_entry_safe_reverse(page_replica, tmp_page, &replica_active_lru, lru) {
-//         if (collected >= nr)
-//             break;
+    pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
+    return freed;
+}
 
-//         list_move(&page_replica->lru, &process_list);
-//         collected++;
-//     }
-//     spin_unlock_irqrestore(&replica_lru_lock, flags);
+/**
+ * replica_age_active_to_inactive - Age pages from active to inactive list
+ * @nr: Number of pages to scan for aging
+ *
+ * Linux-style aging:
+ * - Takes pages from TAIL (LRU) of active list  
+ * - Referenced pages stay in active list MRU
+ * - Non-referenced pages move to inactive list MRU
+ */
+static unsigned int replica_age_active_to_inactive(unsigned long nr)
+{
+    unsigned long flags;
+    unsigned long collected = 0, aged = 0;
+    struct page *page_replica, *tmp_page;
+    struct list_head process_list;
     
-//     pr_info("[%s] Collected %lu pages from active list for aging\n", 
-//             __func__, collected);
+    INIT_LIST_HEAD(&process_list);
     
-//     /* Second pass: check references and age appropriately */
-//     list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
-//         bool refd;
+    /* First pass: collect pages from tail (LRU) of active list */
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    list_for_each_entry_safe_reverse(page_replica, tmp_page, &replica_active_lru, lru) {
+        if (collected >= nr)
+            break;
+
+        list_move(&page_replica->lru, &process_list);
+        collected++;
+    }
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+    
+    pr_info("[%s] Collected %lu pages from active list for aging\n", 
+            __func__, collected);
+    
+    /* Second pass: check references and age appropriately */
+    list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
+        bool refd;
         
-//         /* Check if referenced (last chance for inactive pages) */
-//         refd = check_page_replica_referenced_and_clear(page_replica);
+        /* Check if referenced (last chance for inactive pages) */
+        refd = check_page_replica_referenced_and_clear(page_replica);
         
         
-//         if (refd) {
-//             /* Still referenced - keep in active list MRU */
-//             spin_lock_irqsave(&replica_lru_lock, flags);
-//             __replica_lru_move_to_active_mru(page_replica);
-//             // pr_info("[%s] Keeping referenced page %p in active\n", 
-//             //     __func__, m->page);
-//             } else {
-//             /* Not referenced - move to inactive list MRU */
-//             spin_lock_irqsave(&replica_lru_lock, flags);
-//             __replica_lru_move_to_inactive_mru(page_replica);
-//             aged++;
-//             // pr_info("[%s] Aged page %p to inactive\n", __func__, m->page);
-//         }
-//         spin_unlock_irqrestore(&replica_lru_lock, flags);
-//     }
+        if (refd) {
+            /* Still referenced - keep in active list MRU */
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            __replica_lru_move_to_active_mru(page_replica);
+            // pr_info("[%s] Keeping referenced page %p in active\n", 
+            //     __func__, m->page);
+            } else {
+            /* Not referenced - move to inactive list MRU */
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            __replica_lru_move_to_inactive_mru(page_replica);
+            aged++;
+            // pr_info("[%s] Aged page %p to inactive\n", __func__, m->page);
+        }
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
+    }
     
-//     pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
-//     return aged;
-// }
+    pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
+    return aged;
+}
 
-// /* ========================================================================
-//  * Shrinker integration (single, final)
-//  * ======================================================================== */
+/* ========================================================================
+ * Shrinker integration
+ * ======================================================================== */
 
-// static unsigned long __replica_list_len(struct list_head *head)
-// {
-//     unsigned long n = 0;
-//     struct page_replica_meta *m;
-//     list_for_each_entry(m, head, lru) {
-//         if (++n > REPLICA_MAX_LIST_COUNT)
-//             break;
-//     }
-//     return n;
-// }
+static unsigned long __replica_list_len(struct list_head *head)
+{
+    unsigned long n = 0;
+    struct page *page_replica;
+    list_for_each_entry(page_replica, head, lru) {
+        n++;
+    }
+    return n;
+}
 
-// static unsigned long replica_shrink_count(struct shrinker *s,
-//                                           struct shrink_control *sc)
-// {
-//     unsigned long flags, n;
-//     spin_lock_irqsave(&replica_lru_lock, flags);
-//     n  = __replica_list_len(&replica_inactive_lru);
-//     pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
-//     n += __replica_list_len(&replica_active_lru) / REPLICA_ACTIVE_TO_INACTIVE_RATIO;
-//     spin_unlock_irqrestore(&replica_lru_lock, flags);
+static unsigned long replica_shrink_count(struct shrinker *s,
+                                          struct shrink_control *sc)
+{
+    unsigned long flags, n;
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    n  = __replica_list_len(&replica_inactive_lru);
+    pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
+    n += __replica_list_len(&replica_active_lru) / REPLICA_ACTIVE_TO_INACTIVE_RATIO;
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
 
-//     pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
-//     return n;
-// }
+    pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
+    return n;
+}
 
-// static unsigned long replica_shrink_scan(struct shrink_control *sc)
-// {
-//     unsigned long nr_to_scan = sc->nr_to_scan ? sc->nr_to_scan : REPLICA_DEFAULT_SCAN_PAGES;
-//     unsigned long flags;
-//     unsigned long inactive_len;
-//     unsigned long active_len;
-//     bool age_again = true;
-//     unsigned long freed = 0;
-//     unsigned int aged = 0;
-//     unsigned int age_mult = 1;
-//     unsigned int free_mult = 1;
+static unsigned long replica_shrink_scan(struct shrink_control *sc)
+{
+    unsigned long nr_to_scan = sc->nr_to_scan ? sc->nr_to_scan : REPLICA_DEFAULT_SCAN_PAGES;
+    unsigned long flags;
+    unsigned long inactive_len;
+    unsigned long active_len;
+    bool age_again = true;
+    unsigned long freed = 0;
+    unsigned int aged = 0;
+    unsigned int age_mult = 1;
+    unsigned int free_mult = 1;
     
-//     pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
+    pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
-//     while (freed < nr_to_scan) {
-//         aged = 0;
+    while (freed < nr_to_scan) {
+        aged = 0;
 
-//         /* Step 1: Check if inactive list has enough pages for direct reclaim */
-//         spin_lock_irqsave(&replica_lru_lock, flags);
-//         inactive_len = __replica_list_len(&replica_inactive_lru);
-//         active_len = __replica_list_len(&replica_active_lru);
-//         spin_unlock_irqrestore(&replica_lru_lock, flags);
+        /* Step 1: Check if inactive list has enough pages for direct reclaim */
+        spin_lock_irqsave(&replica_lru_lock, flags);
+        inactive_len = __replica_list_len(&replica_inactive_lru);
+        active_len = __replica_list_len(&replica_active_lru);
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
 
-//         if ( (active_len + inactive_len) < (nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) ) {
-//             pr_info("[%s] Both inactive and active are not enough\n", __func__);
-//             break;
-//         }
+        if ( (active_len + inactive_len) < (nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) ) {
+            pr_info("[%s] Both inactive and active are not enough\n", __func__);
+            break;
+        }
         
-//         if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-//             /* Step 1-1: Direct reclaim from inactive list */
-//             freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
-//             pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
-//                     __func__, inactive_len, freed);
-//             free_mult *= 2; // double the reclaim size next time
-//             continue;
-//         }
+        if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            /* Step 1-1: Direct reclaim from inactive list */
+            freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
+            pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
+                    __func__, inactive_len, freed);
+            free_mult *= 2; // double the reclaim size next time
+            continue;
+        }
         
-//         /* Step 2: Not enough inactive pages, need to age active pages first */
-//         pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
-//                 __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
+        /* Step 2: Not enough inactive pages, need to age active pages first */
+        pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
+                __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
         
-//         while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-//             aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
-//             spin_lock_irqsave(&replica_lru_lock, flags);
-//             active_len = __replica_list_len(&replica_active_lru);
-//             spin_unlock_irqrestore(&replica_lru_lock, flags);
-//             if (!active_len) {
-//                 pr_info("[%s] Active list is empty, cannot age more\n", __func__);
-//                 break;
-//             }
-//             age_mult *= 2; // double the aging size next time
-//             pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
-//                     __func__, aged, active_len);
-//         }
+        while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
+            spin_lock_irqsave(&replica_lru_lock, flags);
+            active_len = __replica_list_len(&replica_active_lru);
+            spin_unlock_irqrestore(&replica_lru_lock, flags);
+            if (!active_len) {
+                pr_info("[%s] Active list is empty, cannot age more\n", __func__);
+                break;
+            }
+            age_mult *= 2; // double the aging size next time
+            pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
+                    __func__, aged, active_len);
+        }
         
-//         /* Step 3: Try reclaim again after aging */
-//         spin_lock_irqsave(&replica_lru_lock, flags);
-//         inactive_len = __replica_list_len(&replica_inactive_lru);
-//         spin_unlock_irqrestore(&replica_lru_lock, flags);
+        /* Step 3: Try reclaim again after aging */
+        spin_lock_irqsave(&replica_lru_lock, flags);
+        inactive_len = __replica_list_len(&replica_inactive_lru);
+        spin_unlock_irqrestore(&replica_lru_lock, flags);
         
-//         if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
-//             freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
-//             free_mult *= 2; // double the reclaim size next time
-//         }
-//     }
+        if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
+            freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
+            free_mult *= 2; // double the reclaim size next time
+        }
+    }
 
-//     pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
-//             __func__, aged, inactive_len, freed);
+    pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
+            __func__, aged, inactive_len, freed);
     
-//     return freed;
-// }
+    return freed;
+}
 
-// static unsigned long replica_shrink_scan_wrapper(struct shrinker *s,
-//                                                 struct shrink_control *sc)
-// {
-//     return replica_shrink_scan(sc);
-// }
+static unsigned long replica_shrink_scan_wrapper(struct shrinker *s,
+                                                struct shrink_control *sc)
+{
+    return replica_shrink_scan(sc);
+}
 
-// static struct shrinker *replica_shrinker;
+static struct shrinker *replica_shrinker;
 
-// /* Manual shrinker trigger function */
-// static void replica_trigger_shrink(unsigned long nr_to_free)
-// {
-//     struct shrink_control sc = {
-//         .nr_to_scan = nr_to_free,
-//         .gfp_mask = GFP_KERNEL,
-//     };
+/* Manual shrinker trigger function */
+static void replica_trigger_shrink(unsigned long nr_to_free)
+{
+    struct shrink_control sc = {
+        .nr_to_scan = nr_to_free,
+        .gfp_mask = GFP_KERNEL,
+    };
     
-//     unsigned long freed = replica_shrink_scan(&sc);
-//     pr_info("[%s] Manual shrink: requested=%lu, freed=%lu\n",
-//             __func__, nr_to_free, freed);
-// }
+    unsigned long freed = replica_shrink_scan(&sc);
+    pr_info("[%s] Manual shrink: requested=%lu, freed=%lu\n",
+            __func__, nr_to_free, freed);
+}
 
-// static int __init replica_shrinker_init(void)
-// {
-//     replica_shrinker = shrinker_alloc(0, "replica_shrinker");
-//     if (!replica_shrinker) {
-//         pr_err("[%s] failed to allocate shrinker\n", __func__);
-//         return -ENOMEM;
-//     }
+static int __init replica_shrinker_init(void)
+{
+    replica_shrinker = shrinker_alloc(0, "replica_shrinker");
+    if (!replica_shrinker) {
+        pr_err("[%s] failed to allocate shrinker\n", __func__);
+        return -ENOMEM;
+    }
 
-//     replica_shrinker->count_objects = replica_shrink_count;
-//     replica_shrinker->scan_objects = replica_shrink_scan_wrapper;
-//     replica_shrinker->seeks = DEFAULT_SEEKS;
+    replica_shrinker->count_objects = replica_shrink_count;
+    replica_shrinker->scan_objects = replica_shrink_scan_wrapper;
+    replica_shrinker->seeks = DEFAULT_SEEKS;
 
-//     // TODO: Register the shrinker later. now is for testing purpose.
-//     shrinker_register(replica_shrinker);
-//     pr_info("[%s] shrinker registered\n", __func__);
-//     return 0;
-// }
-
-// subsys_initcall(replica_shrinker_init);
+    shrinker_register(replica_shrinker);
+    pr_info("[%s] shrinker registered\n", __func__);
+    return 0;
+}
 
 SYSCALL_DEFINE0(flush_replicas)
 {
     pr_info("[syscall] flush_replicas called\n");
-    // int n;
-    // unsigned long flags;
-    // unsigned int aged;
-    // unsigned long freed;
+    int n;
+    unsigned long flags;
+    unsigned int aged;
+    unsigned long freed;
 
-    // pr_info("[syscall] flush_replicas: aging active to inactive\n");
-    // aged = replica_age_active_to_inactive(REPLICA_MAX_LIST_COUNT);
-    // pr_info("[syscall] flush_replicas: aged %u pages\n", aged);
+    pr_info("[syscall] flush_replicas: aging active to inactive\n");
+    aged = replica_age_active_to_inactive(REPLICA_MAX_LIST_COUNT);
+    pr_info("[syscall] flush_replicas: aged %u pages\n", aged);
 
-    // spin_lock_irqsave(&replica_lru_lock, flags);
-    // n = __replica_list_len(&replica_inactive_lru);
-    // spin_unlock_irqrestore(&replica_lru_lock, flags);
-    // pr_info("[syscall] flush_replicas: reclaiming for %d pages\n", n);
-    // freed = replica_reclaim_from_inactive(n);  
-    // pr_info("[syscall] flush_replicas: reclaimed %lu pages\n", freed); 
+    spin_lock_irqsave(&replica_lru_lock, flags);
+    n = __replica_list_len(&replica_inactive_lru);
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+    pr_info("[syscall] flush_replicas: reclaiming for %d pages\n", n);
+    freed = replica_reclaim_from_inactive(n);  
+    pr_info("[syscall] flush_replicas: reclaimed %lu pages\n", freed); 
     return 0;
 }
 
-// /* ========================================================================
-//  * Public API for page coherence integration
-//  * ======================================================================== */
+/* ============================================================================= 
+ * Page Replication Utility Functions
+ * ============================================================================= */
 
-// /* Simple and unified copy function - caller handles all mapping */
-// static int copy_data(void *src_kaddr, void *dst_kaddr, size_t size)
-// {
-//     if (!src_kaddr || !dst_kaddr) {
-//         pr_err("[%s] NULL address provided: src=%p, dst=%p\n", 
-//                __func__, src_kaddr, dst_kaddr);
-//         return REPLICA_ERROR_INVAL;
-//     }
+/* 하위 2비트 태그 */
+#define SWMC_TAG_MASK          0x3UL
+#define SWMC_TAG_PTR           0x0UL  /* replica 포인터 저장됨 */
+#define SWMC_TAG_ACCESS        0x1UL  /* 상32: access_count, 하32: flags */
+#define SWMC_TAG_REPLICA_SELF  0x2UL  /* 이 page 자체가 replica */
+#define SWMC_TAG_RSVD          0x3UL  /* 예약/에러 */
+
+static inline struct page *swmc_decode_replica_ptr(unsigned long v)
+{
+    return (struct page *)(v & ~SWMC_TAG_MASK);
+}
+
+static inline unsigned int swmc_access_flags(unsigned long v) { return (u32)(v & 0xffffffffUL); }
+static inline unsigned int swmc_access_count(unsigned long v) { return (u32)(v >> 32); }
+static inline unsigned short swmc_last_accessed_age(unsigned long v) { return (unsigned short)((v & 0xffff0000UL) >> 16); }
+
+struct page *get_replica_opt(struct page *orig)
+{
+    unsigned long v = READ_ONCE(orig->private);
+
+    print_page_info(orig, "original_page in get_replica");
+    pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
+            __func__, orig, v);
+
+    if (!v) {
+        pr_info("[Info]%s: not replicated (private==0)\n", __func__);
+        return NULL;
+    }
+
+    switch (v & SWMC_TAG_MASK) {
+    case SWMC_TAG_PTR: {
+        struct page *rep = swmc_decode_replica_ptr(v);
+        pr_info("[Info]%s: replica pointer -> %px\n", __func__, rep);
+        return rep;
+    }
+    case SWMC_TAG_ACCESS:
+        pr_info("[Info]%s: access-mode (flags=0x%x, access_count=%u) => no replica\n",
+                __func__, swmc_access_flags(v), swmc_access_count(v));
+        return NULL;
+
+    case SWMC_TAG_REPLICA_SELF:
+        pr_info("[Info]%s: this page is a REPLICA itself => no replica-of\n", __func__);
+        return NULL;
+
+    default: /* SWMC_TAG_RSVD */
+        pr_warn("[Warn]%s: invalid tag(11b), private=0x%lx\n", __func__, v);
+        return NULL;
+    }
+}
+
+struct page *get_original_opt(struct page *page_replica)
+{
+    struct page *original;
+    if (!page_replica->memcg_data){
+        pr_err("[Error]%s: page_replica->memcg_data is NULL for page_replica=0x%lx\n", __func__, (unsigned long)page_replica);
+    }
+    original = page_replica->memcg_data;
+    return original;
+}
+
+/* Copy one (possibly compound) page to another.
+ * order == 0 : use kmap_local_page/kunmap_local (fast, per-CPU)
+ * order > 0  : use kmap/kunmap (for high-order physically contiguous pages)
+ * Returns: 0 on success, negative errno on failure.
+ */
+static int copy_data_page(struct page *src_page, struct page *dst_page, unsigned int order)
+{
+    void *src_kaddr = NULL, *dst_kaddr = NULL;
+    size_t bytes;
+
+    if (!src_page || !dst_page) {
+        pr_err("[%s] NULL page: src=%px dst=%px\n", __func__, src_page, dst_page);
+        return -EINVAL;
+    }
+
+    bytes = (size_t)PAGE_SIZE << order;
+
+    if (order > 0) {
+        /* High-order: use kmap (non-local) */
+        src_kaddr = kmap(src_page);
+        if (!src_kaddr) {
+            pr_err("[%s] kmap(src) failed (order=%u)\n", __func__, order);
+            return -ENOMEM;
+        }
+
+        dst_kaddr = kmap(dst_page);
+        if (!dst_kaddr) {
+            pr_err("[%s] kmap(dst) failed (order=%u)\n", __func__, order);
+            kunmap(src_page);
+            return -ENOMEM;
+        }
+    } else {
+        /* order==0: faster per-CPU local mapping */
+        src_kaddr = kmap_local_page(src_page);
+        if (!src_kaddr) {
+            pr_err("[%s] kmap_local(src) failed\n", __func__);
+            return -ENOMEM;
+        }
+
+        dst_kaddr = kmap_local_page(dst_page);
+        if (!dst_kaddr) {
+            pr_err("[%s] kmap_local(dst) failed\n", __func__);
+            kunmap_local(src_kaddr);
+            return -ENOMEM;
+        }
+    }
+
+    memcpy(dst_kaddr, src_kaddr, bytes);
+
+    if (order > 0) {
+        kunmap(dst_page);
+        kunmap(src_page);
+    } else {
+        kunmap_local(dst_kaddr);
+        kunmap_local(src_kaddr);
+    }
+
+    return 0;
+}
+
+/* Helper to allocate pages with retry and shrinking */
+static struct page *allocate_page_replica_with_retry(unsigned int order)
+{
+    struct page *page_replica;
+    gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO;
+    int retry_count= 0;
+
+retry_alloc:
+    page_replica = alloc_pages(gfp_flags, order);
     
-//     memcpy(dst_kaddr, src_kaddr, size);
-//     // pr_info("[%s] Copied %zu bytes from %p to %p\n", 
-//     //         __func__, size, src_kaddr, dst_kaddr);
-    
-//     return REPLICA_SUCCESS;
-// }
+    if (unlikely(!page_replica)) {
+        if (retry_count < MAX_ALLOCATE_RETRIES) {
+            /* Calculate how many pages to free */
+            unsigned long pages_to_free = (order==0) ? 1 : 16; // to get as fast as possible
 
-// /* Helper function to safely map pages*/
-// static void *kmap_page_safe(struct page *page, unsigned int order)
-// {
-//     if (order > 0) {
-//         void *kaddr = kmap(page);
-//         if (!kaddr) {
-//             pr_err("%s: Failed to kmap pages for order %u\n", __func__, order);
-//             return NULL;
-//         }
-
-//         // pr_info("[%s] Mapped pages (order=%u) using kmap\n", __func__, order);
-//         return kaddr;
-//     } else {
-//         void *kaddr = kmap_local_page(page);
-//         if (!kaddr) {
-//             pr_err("%s: Failed to kmap_local_page for order %u\n", __func__, order);
-//             return NULL;
-//         }
-//         // pr_info("[%s] Mapped pages (order=%u) using kmap_local_page\n", __func__, order);
-//         return kaddr;
-//     }
-// }
-
-// static void *kunmap_page_safe(struct page *page, void *kaddr, unsigned int order)
-// {
-//     if (order > 0) {
-//         kunmap(page);
-//         // pr_info("[%s] Unmapped pages (order=%u) using kunmap\n", __func__, order);
-//     } else {
-//         kunmap_local(kaddr);
-//         // pr_info("[%s] Unmapped pages (order=%u) using kunmap_local\n", __func__, order);
-//     }
-//     return NULL;
-// }
-
-// static int unmap_page_replica(struct page *page_replica, unsigned int order)
-// {
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return REPLICA_ERROR_INVAL;
-//     }
-
-//     pr_info("[%s] Unmapping page replica %p (order=%u)\n", __func__, page_replica, order);
-
-//     struct address_space *mapping = page_replica->mapping;
-//     // TODO: Check if this works well.
-//     if (!mapping) {
-//         pr_err("[%s] Page %p has no mapping, which is already cleaned because of process termination\n", __func__, page_replica);
-//         return REPLICA_SUCCESS; // No mapping, nothing to unmap
-//     }
-
-//     // if (unlikely(!mapping)) {
-//     //     pr_err("[%s] Page %p has no mapping, cannot unmap\n", __func__, page_replica);
-//     //     return REPLICA_ERROR_INVAL;
-//     // }
-
-//     unsigned long index = page_replica->index; // page_replica->index is identical with linear_page_index(vma, address & ~(size - 1)) and also with vmf->pgoff, which is the key of Xarray(mapping)
-//     int ret;
-
-
-//     // temporarliy casting to folio to use dax folio helpers
-//     struct folio *folio_replica = page_folio(page_replica);
-//     dax_entry_t cookie;
-//     cookie = dax_lock_folio(folio_replica);
-//     if (!cookie) {
-//         pr_err("[%s] Failed to lock folio %p for unmapping\n", __func__, page_replica);
-//         return REPLICA_ERROR_LOCK;
-//     }
-
-//     // print_page_info(page_replica, "Before unmap_mapping_pages");
-//     // print_page_info(page_replica + 1, "Before unmap_mapping_pages + 1");
-//     // print_page_info(page_replica + 2, "Before unmap_mapping_pages + 2");
-    
-//     unmap_mapping_pages(mapping, index, 1 << order, false);
-    
-//     // print_page_info(page_replica, "Before dax_delete_mapping_entry replica");
-//     // print_page_info(page_replica + 1, "Before dax_delete_mapping_entry + 1");
-//     // print_page_info(page_replica + 2, "Before dax_delete_mapping_entry + 2");
-
-//     dax_unlock_folio(folio_replica, cookie);
-
-//     // Remove the mapping entry from the XArray
-//     pr_info("[%s] Removing mapping entry for page %p (index=%lu)\n", __func__, page_replica, index);
-
-//     // return 1 if sucessed
-//     ret = dax_delete_mapping_entry(mapping, index);
-
-//     // print_page_info(page_replica, "After unmap_mapping_pages and dax_delete_mapping_entry");
-//     // print_page_info(page_replica + 1, "After unmap_mapping_pages and dax_delete_mapping_entry + 1");
-//     // print_page_info(page_replica + 2, "After unmap_mapping_pages and dax_delete_mapping_entry + 2");
-
-//     return ret ? REPLICA_SUCCESS : REPLICA_ERROR_ANY;
-// }
-
-// /* Helper to allocate pages with retry and shrinking */
-// static struct page *allocate_page_replica_with_retry(unsigned int order)
-// {
-//     struct page *page_replica;
-//     gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO;
-//     int retry_count= 0;
-
-// retry_alloc:
-//     page_replica = alloc_pages(gfp_flags, order);
-    
-//     if (unlikely(!page_replica)) {
-//         if (retry_count < MAX_ALLOCATE_RETRIES) {
-//             /* Calculate how many pages to free */
-//             unsigned long pages_to_free = (order==0) ? 1 : 16; // to get as fast as possible
-
-//             pr_info("[%s] Allocation failed (retry %d/%d), triggering manual shrink of %lu pages\n",
-//                     __func__, retry_count + 1, MAX_ALLOCATE_RETRIES, pages_to_free);
-//             replica_trigger_shrink(pages_to_free);
-//             msleep(10);  /* Brief delay for shrinking to complete */
+            pr_info("[%s] Allocation failed (retry %d/%d), triggering manual shrink of %lu pages\n",
+                    __func__, retry_count + 1, MAX_ALLOCATE_RETRIES, pages_to_free);
+            replica_trigger_shrink(pages_to_free);
+            msleep(10);  /* Brief delay for shrinking to complete */
             
-//             retry_count++;
-//             goto retry_alloc;
-//         }
-//         pr_err("[%s] Failed to allocate page replica after %d retries (order=%u)\n",
-//             __func__, MAX_ALLOCATE_RETRIES, order);
-//         return NULL;
-//     }
+            retry_count++;
+            goto retry_alloc;
+        }
+        pr_err("[%s] Failed to allocate page replica after %d retries (order=%u)\n",
+            __func__, MAX_ALLOCATE_RETRIES, order);
+        return NULL;
+    }
 
-//     if (retry_count > 0) {
-//         pr_info("[%s] Allocation succeeded after %d retries and manual shrinking\n", 
-//                 __func__, retry_count);
-//     }
+    if (retry_count > 0) {
+        pr_info("[%s] Allocation succeeded after %d retries and manual shrinking\n", 
+                __func__, retry_count);
+    }
 
-//     // print_page_info(page_replica, "Allocated page replica");
-//     // print_page_info(page_replica + 1, "Allocated page replica + 1");
-//     // print_page_info(page_replica + 2, "Allocated page replica + 2");
-//     track_page_alloc(order);
-//     return page_replica;
-// }
+    // print_page_info(page_replica, "Allocated page replica");
+    // print_page_info(page_replica + 1, "Allocated page replica + 1");
+    // print_page_info(page_replica + 2, "Allocated page replica + 2");
+    track_page_alloc(order);
+    return page_replica;
+}
 
-// /**
-//  * create_page_replica - Create a new page replica
-//  * @order: order (0 for single page, PMD_ORDER for page 512 pages)
-//  * @original_pfn: Original page PFN to replicate
-//  * @src_kaddr: Source kernel virtual address for data copy
-//  *
-//  * Creates a new page replica, adds it to LRU management, and establishes
-//  * bidirectional mapping with the original page.
-//  *
-//  * Returns: Replica page pointer on success, ERR_PTR on failure
-//  */
-// struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *src_kaddr)
-// {
-//     struct page *page_replica;
-//     unsigned long pfn_key = pfn_t_to_pfn(original_pfn);
-//     int err;
-//     size_t size = PAGE_SIZE << order; // Calculate size based on order
+/**
+ * create_page_replica - Create a new page replica
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int create_page_replica(struct page *page_original, unsigned int order)
+{
+    struct page *page_replica;
+    int err;
+    size_t size = PAGE_SIZE << order; // Calculate size based on order
 
-//     // Check for duplicate replica, existance of replica should be checked before call create_page_replica
-//     if (xa_load(&original_to_replica_xa, pfn_key)) {
-//         pr_err("[Err]%s: Replica already exists for pfn %lu\n", __func__, pfn_key);
-//         return ERR_PTR(REPLICA_ERROR_EXIST);
-//     }
+    if (get_replica_opt(page_original)) {
+        pr_err("[%s] Page %p is already a replica\n", __func__, page_original);
+        return -EINVAL;
+    }
 
-//     /* Step 1: Allocate page replica with retry and manual shrinking */
-//     page_replica = allocate_page_replica_with_retry(order);
-//     if (!page_replica) {
-//         pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
-//         return ERR_PTR(REPLICA_ERROR_NOMEM);
-//     }
+    /* Step 1: Allocate page replica with retry and manual shrinking */
+    page_replica = allocate_page_replica_with_retry(order);
+    if (!page_replica) {
+        pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
+        return -ENOMEM;
+    }
 
-//     /* Step 2: Copy data from source to replica using unified helper */
-//     void *dst_kaddr = kmap_page_safe(page_replica, order);
-//     if (!dst_kaddr) {
-//         pr_err("[%s] Failed to kmap page replica for copy\n", __func__);
-//         err = REPLICA_ERROR_ANY;
-//         goto free_pages;
-//     }
+    /* Step 2: Copy data from original to replica */
+    err = copy_data_page(page_original, page_replica, order);
+    if (err) {
+        pr_err("[%s] Data copy failed: %d\n", __func__, err);
+        goto free_pages;
+    }
 
-//     err = copy_data(src_kaddr, dst_kaddr, size);
+    /* Step 3: Set struct page infomation */
+    page_replica->private = page_original->private & ~SWMC_TAG_MASK; // copy private data except tag bits
+    page_replica->private = page_replica->private | SWMC_TAG_REPLICA_SELF | SWMC_TAG_ACCESS;
+    page_replica->mapping = page_original->mapping;
+    page_replica->index = page_original->index;
 
-//     kunmap_page_safe(page_replica, dst_kaddr, order);
-//     if (err != REPLICA_SUCCESS) {
-//         pr_err("[%s] Data copy failed: %d\n", __func__, err);
-//         goto free_pages;
-//     }
+    if (PageModified(page_original) && PageShared(page_original)) {
+        pr_info("[Info]%s: Original page 0x%lx is stale shared page, skip replication\n",
+                __func__, page_to_pfn(page_original));
+        goto free_pages;
+    }
+    if (PageModified(page_original))
+        SetPageModified(page_replica);
+    if (PageShared(page_original))
+        SetPageShared(page_replica);
+    if (PageCoherence(page_original))
+        SetPageCoherence(page_replica);
 
-//     // TODO: Step 3 and 4 should be done in atomic context. but later wee need to change lru later in LRU management.
-//     // for now, we just want to see for basic functionality.
-//     /* Step 3: Add to LRU management */
-//     err = insert_replica_lru(page_replica, order);
-//     if (err) {
-//         pr_err("[%s] LRU insertion failed: %d\n", __func__, err);
-//         goto free_pages;
-//     }
+    page_replica->memcg_data = page_original;
+    page_original->private = page_replica;
 
-//     /* Step 4: Establish bidirectional mapping */
-//     err = establish_bidir_mapping(page_replica, pfn_key);
-//     if (err) {
-//         pr_err("[%s] Mapping establishment failed: %d\n", __func__, err);
-//         goto remove_from_lru;
-//     }
+    /* step 4: Add replica page to LRU*/
+    insert_replica_lru(page_replica);
 
-//     pr_info("[%s] Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
-//             __func__, order, page_to_pfn(page_replica), pfn_key);
+    /* Step 5: Unmap original page */
+    struct address_space *mapping = page_original->mapping;
+    pgoff_t index = page_original->index;
+    unmap_mapping_pages(mapping, index, 1 << order, false);
 
-//     return page_replica;
+    pr_info("[Info]%s: Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
+            __func__, order, page_to_pfn(page_replica), page_to_pfn(page_original));
 
-// remove_from_lru:
-//     remove_replica_lru(page_replica);
-//     pr_err("[%s] Removed page replica from LRU due to mapping failure\n", __func__);
+    return 0;
 
-// free_pages:
-//     __free_pages(page_replica, order);
-//     track_page_free(order);
-//     return ERR_PTR(err);
-// } 
-// EXPORT_SYMBOL(create_page_replica);
+free_pages:
+    __free_pages(page_replica, order);
+    track_page_free(order);
+    return err;
+}
 
-// // No writeback for page replica, just destroy it
-// int destroy_page_replica(struct page *page_replica)
-// {
-//     int err;
-//     // pr_info("[%s] Destroying page replica %p\n", __func__, page_replica);
+/* Writeback page replica data to original page
+ * This is used in page_coherence.c too.
+ */
+int writeback_page_replica(struct page *page_replica)
+{
+    int order = 0;
+    struct page *page_original = get_original_opt(page_replica);
 
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return REPLICA_ERROR_INVAL;
-//     }
+    if (!page_original) {
+        pr_err("[Err]%s: Original page is NULL for replica page %p\n", __func__, page_replica);
+        return -EINVAL;
+    }
 
-//     // TODO: We need to ensure for concurrency safety later. for now, we just remove it from LRU and mapping XArrays.
-//     // TODO: More understanding with reference counting needed. Why does it needed? Can we just get it from argument?
-//     struct page_replica_meta *m = get_page_replica_meta(page_replica);
-//     if (!m) {
-//         pr_err("[%s] Failed to get page replica meta for %p\n", __func__, page_replica);
-//         return REPLICA_ERROR_NOMEM;
-//     }
-//     int order = m->order;
-//     if (order < 0) {
-//         pr_err("[%s] Invalid order for page replica %p: %d\n", __func__, page_replica, order);
-//         return REPLICA_ERROR_INVAL;
-//     }
-//     put_page_replica_meta(m); // Decrement reference count
-
-//     /* Step 1: Remove from LRU */
-//     remove_replica_lru(page_replica);
-
-//     /* Step 2: Remove bidirectional mapping */
-//     unsigned long pfn_key = replica_to_original_pfn(page_replica);
-//     remove_bidir_mapping(page_replica, replica_to_original_pfn(page_replica));
-
-//     /* Step 3: Unmap replica pages */
-//     err = unmap_page_replica(page_replica, order);
-//     if (err != REPLICA_SUCCESS) {
-//         pr_err("[%s] Failed to unmap replica page %p: %d\n", __func__, page_replica, err);
-//         // restore mapping if unmap failed
-//         insert_replica_lru(page_replica, order);
-//         establish_bidir_mapping(page_replica, pfn_key);
-//         return err;
-//     }
+    pr_info("[Info]%s: Writing back replica page %p to original page %p\n",
+            __func__, page_replica, page_original);
     
-//     /* Step 4: Free pages */
-//     __free_pages(page_replica, order);
-//     track_page_free(order);
-//     pr_info("[%s] Successfully destroyed page replica %p (order=%u)\n",
-//             __func__, page_replica, order);
+    /* Step 1: Copy data from original to replica */
+    copy_data_page(page_replica, page_original, order);
 
-//     return REPLICA_SUCCESS;
-// } 
-// EXPORT_SYMBOL(destroy_page_replica);
+    /* Step 2: Flush cachelines */
+    pr_info("[Info]%s: Flushing dcache for original page %p\n",
+            __func__, page_original);
+    flush_dcache_page(page_original);
+    return 0;
+}
+
+int flush_page_replica(struct page *page_replica)
+{
+    int order = 0;
+    int err;
+
+    /* Step 1-2: Writeback page replica */
+    err = writeback_page_replica(page_replica);
+    if (err) {
+        pr_err("[Err]%s: Failed to writeback replica page %p: %d\n",
+                __func__, page_replica, err);
+        return err;
+    }
+
+    struct page *page_original = get_original_opt(page_replica);
+
+    /* Step 3: Set struct page information */
+    page_original->private = page_replica->private & ~SWMC_TAG_MASK; // copy private data except tag bits
+    page_original->private = page_original->private | SWMC_TAG_ACCESS;
+    page_original->mapping = page_replica->mapping;
+    page_original->index = page_replica->index;
+
+    if (PageModified(page_replica) && PageShared(page_replica)) {
+        pr_info("[Info]%s: Page replica 0x%lx is stale shared page, skip replication\n",
+                __func__, page_to_pfn(page_replica));
+        goto free_pages;
+    }
+    if (PageModified(page_replica))
+        SetPageModified(page_original);
+    if (PageShared(page_replica))
+        SetPageShared(page_original);
+    if (PageCoherence(page_replica))
+        SetPageCoherence(page_original);
+
+    page_replica->private = 0; // clear private data
+    page_replica->memcg_data = NULL;
+
+    /* step 4: Remove replica page to LRU*/
+    remove_replica_lru(page_replica);
+
+    /* Step 5: Unmap page replica */
+    struct address_space *mapping = page_original->mapping;
+    pgoff_t index = page_original->index;
+    unmap_mapping_pages(mapping, index, 1 << order, false);
+
+    /* Step 6: Free page replica */
+free_pages:
+    __free_pages(page_replica, order);
+    track_page_free(order);
+
+    pr_info("[Info]%s: Successfully wrote back replica page %p to original pfn %lu\n",
+            __func__, page_replica, page_to_pfn(page_original));
+
+    return 0;
+}
+
+/* ========================================================================
+ * Page Replication Daemon
+ * ======================================================================== */
+
+/*
+ * 전제:
+ * - struct page의 private 필드의 MSB부터 32bit를 access count로 사용.
+ * - struct page의 private 필드의 LSB 2bit는 태그로 사용.
+ * - struct page의 private 필드의 16~31 bit는 last_accessed_age로 사용.
+ * - replica의 경우, original page의 private 필드는 replica page의 포인터로 사용.
+ *
+ * 대충 workflow
+ * 1. PEBS 이벤트로 sampling마다 (original, replica에 관계없이) 
+ *    1-1. access count +1
+ *    1-2. last_accessed_age - monitoring_age 만큼 access count를 shift. (/2^n)
+ *    1-3. access count가 hotness_threshold 넘는 page들은 replication_candidate에 추가
+ * 2. replication_interval마다
+ *    2-1. active_list_lru와 inactive_list_lru를 전부 돌면서, hotness_threshold를 못넘은 page들은 list에서 제거하고 eviction_list에 추가
+ *    2-2. replication_candidate를 돌면서, element가 replication 되어있지 않다면 (original page라면) replication_list에 추가
+ *    2-3. eviction_list는 flush, replication_list는 replication 수행.
+ *    2-4. monitoring_age를 1 증가시킴.
+ * 3. histogram 기반으로 hotness threshold 정함.
+ * 4. histogram을 전부 1/2로 줄임.
+ */
+
+unsigned long hist [32];
+unsigned long hotness_threshold = 10; // MSB index 기준.
+unsigned long monitoring_age = 0;
+unsigned long replication_interval = 10; // seconds // TODO: sysfs로 설정 가능하게 만들기
+unsigned long hot_page_percentile = 20; // 상위 20%를 hot으로 간주. TODO: sysfs로 설정 가능하게 만들기
+
+struct page_list {
+    struct page **pages;
+    unsigned long count;
+    unsigned long size;
+};
+
+#define INITIAL_PAGE_LIST_SIZE 1024
+
+struct page_list replication_candidate;
+struct page_list eviction_list;
+struct page_list replication_list;
+
+void init_page_list(struct page_list *plist)
+{
+    plist->pages = kmalloc_array(INITIAL_PAGE_LIST_SIZE, sizeof(struct page *), GFP_KERNEL);
+    if (!plist->pages) {
+        pr_err("[Err]%s: Failed to allocate page list\n", __func__);
+        plist->count = 0;
+        plist->size = 0;
+        return;
+    }
+    plist->count = 0;
+    plist->size = INITIAL_PAGE_LIST_SIZE;
+}
+
+void free_page_list(struct page_list *plist)
+{
+    kfree(plist->pages);
+    plist->pages = NULL;
+    plist->count = 0;
+    plist->size = 0;
+}
+
+void add_page_to_list(struct page_list *plist, struct page *page)
+{
+    if (plist->count >= plist->size) {
+        unsigned long new_size = plist->size * 2;
+        struct page **new_pages = krealloc(plist->pages, new_size * sizeof(struct page *), GFP_KERNEL);
+        if (!new_pages) {
+            pr_err("[Err]%s: Failed to realloc page list\n", __func__);
+            return;
+        }
+        plist->pages = new_pages;
+        plist->size = new_size;
+    }
+    plist->pages[plist->count++] = page;
+}
+
+void clear_page_list(struct page_list *plist)
+{
+    plist->count = 0;
+}
 
 
-// // replica -> original 복사 한 다음에, original에 대한 cache를 flush 해줘야함. 
-// // Writeback the page replica to original page if dirty, otherwise do nothing
-// // Return REPLICA_SUCCESS if writeback done, REPLICA_SHARED_STATE if no write
-// int writeback_page_replica(struct page *page_replica)
-// {
-//     int ret;
-
-//     // pr_info("[%s] Checking page replica is dirty before writeback\n", __func__);
-//     if (!check_page_replica_dirty_and_clean(page_replica)) {
-//         pr_info("[%s] Page replica %p is not dirty, no writeback needed\n", __func__, page_replica);
-//         return REPLICA_SHARED_STATE; // No writeback needed
-//     }
-
-//     // pr_info("[%s] Writing back page replica %p\n", __func__, page_replica);
-
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return REPLICA_ERROR_INVAL;
-//     }
-
-//     // TODO: We need to ensure for concurrency safety later. for now, we just remove it from LRU and mapping XArrays.
-//     // TODO: More understanding with reference counting needed. Why does it needed? Can we just get it from argument?
-//     struct page_replica_meta *m = get_page_replica_meta(page_replica);
-//     if (!m) {
-//         pr_err("[%s] Failed to get page replica meta for %p\n", __func__, page_replica);
-//         return REPLICA_ERROR_NOMEM;
-//     }
-//     int order = m->order;
-//     if (order < 0) {
-//         pr_err("[%s] Invalid order for page replica %p: %d\n", __func__, page_replica, order);
-//         return REPLICA_ERROR_INVAL;
-//     }
-//     put_page_replica_meta(m); // Decrement reference count
-
-//     /* Step 1: Get original pfn with Xarray */
-//     unsigned long pfn_key = replica_to_original_pfn(page_replica);
-//     if (!pfn_key) {
-//         pr_err("[Err]%s: No original PFN mapping found for replica page %p\n", __func__, page_replica);
-//         return REPLICA_ERROR_NOENT;
-//     }
-
-//     // temporarliy casting to folio to use dax folio helpers
-//     struct folio *folio_replica = page_folio(page_replica);
-//     dax_entry_t cookie;
+static void get_eviction_list(struct page_list *eviction_list, unsigned long threshold)
+{
+    unsigned long flags;
+    struct page *page;
     
-
-//     /* Step 2: Clean R/W bit of all PTE/PMD */
-//     struct address_space *mapping = page_replica->mapping;
-//     // TODO: Check if this works well.
-//     if (!mapping) {
-//         pr_info("[%s] Page %p has no mapping, so skip cleaning R/W bit\n", __func__, page_replica);
-//         // for test
-//         goto skip_rw_clean;
-//     }
-
-//     cookie = dax_lock_folio(folio_replica);
-//     if (!cookie) {
-//         pr_err("[%s] Failed to lock folio %p for unmapping\n", __func__, page_replica);
-//         return REPLICA_ERROR_LOCK;
-//     }
-
-//     struct vm_area_struct *vma;
-//     pfn_t pfn = page_to_pfn_t(page_replica);
-//     unsigned long count = 1UL << order;
-//     unsigned long index = page_replica->index;
-//     unsigned long end = index + count - 1;
-//     i_mmap_lock_read(mapping);
-//     vma_interval_tree_foreach(vma, &mapping->i_mmap, index, end) {
-//         pfn_mkclean_range(pfn_t_to_pfn(pfn), count, index, vma);
-//         cond_resched();
-//     }
-//     i_mmap_unlock_read(mapping);
-
-//     dax_unlock_folio(folio_replica, cookie);
-
-// skip_rw_clean:
-//     /* Step 3: kmap for copy */
-//     void *src_kaddr = kmap_page_safe(page_replica, order);
-//     if (!src_kaddr) {
-//         pr_err("[%s] Failed to kmap page replica for writeback\n", __func__);
-//         return REPLICA_ERROR_ANY;
-//     }
-
-//     void *dst_kaddr = kmap_page_safe(pfn_to_page(pfn_key), order);
-//     if (!dst_kaddr) {
-//         pr_err("[%s] Failed to kmap original page for writeback\n", __func__);
-//         kunmap_page_safe(page_replica, src_kaddr, order);
-//         return REPLICA_ERROR_ANY;
-//     }
-
-//     /* Step 4: copy */
-//     size_t size = PAGE_SIZE << order; // Calculate size based on order
-//     ret = copy_data(src_kaddr, dst_kaddr, size);
-//     if (ret != REPLICA_SUCCESS) {
-//         pr_err("[%s] Data copy failed: %d\n", __func__, ret);
-//         kunmap_page_safe(pfn_to_page(pfn_key), dst_kaddr, order);
-//         kunmap_page_safe(page_replica, dst_kaddr, order);
-//         return ret;
-//     }
-
-//     /* Step 5: Flush cache to make shure writeback */
-//     volatile char *buffer = (volatile char *)dst_kaddr;
-//     for (unsigned long i = 0; i < size; i += CL_SIZE) {
-//         clflush((volatile void *)&buffer[i]);
-//     }
-
-//     /* Step 6: kunmap */
-//     kunmap_page_safe(page_replica, src_kaddr, order);
-//     kunmap_page_safe(pfn_to_page(pfn_key), dst_kaddr, order);
+    spin_lock_irqsave(&replica_lru_lock, flags);
     
-//     pr_info("[%s] Successfully wrote back replica page %p to original pfn %lu\n",
-//             __func__, page_replica, pfn_key);
-
-//     /* Step 7?: Clean dirty mark in DAX entry? Do we need this? -> move to the first of this function */
-//     return REPLICA_SUCCESS;
-// } 
-// EXPORT_SYMBOL(writeback_page_replica);
-
-// int fetch_page_replica(struct page *page_replica, unsigned int order, void *src_kaddr)
-// {
-//     int err;
-//     size_t size = PAGE_SIZE << order;
-//     struct page_replica_meta *meta = get_page_replica_meta(page_replica);
+    list_for_each_entry(page, &replica_active_lru, lru) {
+        unsigned long v = READ_ONCE(page->private);
+        unsigned int access_count = swmc_access_count(v);
+        int msb_index = fls64(access_count) - 1; // fls64 returns 1-based index
+        if (msb_index < threshold) {
+            add_page_to_list(eviction_list, page);
+            remove_replica_lru(page);
+        }
+    }
     
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return -1;
-//     }
-
-//     /* Step 2: Copy data from source to replica using unified helper */
-//     void *dst_kaddr = kmap_page_safe(page_replica, order);
-//     if (!dst_kaddr) {
-//         pr_err("[%s] Failed to kmap page replica for copy\n", __func__);
-//         err = REPLICA_ERROR_ANY;
-//     }
-
-//     err = copy_data(src_kaddr, dst_kaddr, size);
-
-//     kunmap_page_safe(page_replica, dst_kaddr, order);
-//     if (err != REPLICA_SUCCESS) {
-//         pr_err("[%s] Data copy failed: %d\n", __func__, err);
-
-//     }
-
-//     meta->invalidated = false; // Mark as valid
-//     put_page_replica_meta(meta); // Decrement reference count
-
-//     return 0;
-// }
-// EXPORT_SYMBOL(fetch_page_replica);
-
-// /**
-//  * get_page_replica_with_ref - Get existing page replica by original PFN and order
-//  * @original_pfn: Original page PFN to look up
-//  * @order: Order of the page (0 for single page, PMD_ORDER for huge page)
-//  *
-//  * Returns: Replica page pointer if found, NULL if not found
-//  * 
-//  * Note: Caller must call put_page_replica_ref() when done with the returned page
-//  * to release the reference and avoid memory leaks.
-//  */
-// struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order)
-// {
-//     unsigned long pfn_key = pfn_t_to_pfn(original_pfn);
-//     struct page *page_replica;
-//     struct page_replica_meta *meta;
+    list_for_each_entry(page, &replica_inactive_lru, lru) {
+        unsigned long v = READ_ONCE(page->private);
+        unsigned int access_count = swmc_access_count(v);
+        int msb_index = fls64(access_count) - 1; // fls64 returns 1-based index
+        if (msb_index < threshold) {
+            add_page_to_list(eviction_list, page);
+            remove_replica_lru(page);
+        }
+    }
     
-//     /* First: get replica page pointer (may become stale) */
-//     page_replica = xa_load(&original_to_replica_xa, pfn_key);
-//     if (!page_replica)
-//         return NULL;
+    spin_unlock_irqrestore(&replica_lru_lock, flags);
+}
+
+static int evict_pages(struct page_list *eviction_list)
+{
+    unsigned long i;
+    int err;
+
+    for (i = 0; i < eviction_list->count; i++) {
+        struct page *page = eviction_list->pages[i];
+        err = flush_page_replica(page);
+        if (err) {
+            pr_err("[Err]%s: Failed to flush page replica %p: %d\n", __func__, page, err);
+        }
+    }
+
+    clear_page_list(eviction_list);
+    return 0;
+}
+
+static int replicate_pages(struct page_list *replication_list)
+{
+    unsigned long i;
+    int err;
+
+    for (i = 0; i < replication_list->count; i++) {
+        struct page *page = replication_list->pages[i];
+        err = create_page_replica(page, 0); // order 0
+        if (err) {
+            pr_err("[Err]%s: Failed to create page replica for %p: %d\n", __func__, page, err);
+        }
+    }
+
+    clear_page_list(replication_list);
+    return 0;
+}
+
+int handle_sampled_address(unsigned long phys_addr)
+{
+    struct page *page;
+    unsigned long pfn;
+    unsigned long v;
+    unsigned int access_count;
+    unsigned short last_accessed_age;
+    unsigned long new_access_count;
+    unsigned long flags;
+
+    pfn = phys_addr >> PAGE_SHIFT;
+    page = pfn_to_page(pfn);
+    if (!page) {
+        pr_err("[Err]%s: Invalid page for phys_addr=0x%lx\n", __func__, phys_addr);
+        return -EINVAL;
+    }
+    if (!PageCoherence(page)) {
+        pr_info("[Info]%s: Page 0x%lx is not coherence-enabled, skipping\n", __func__, pfn);
+        return -EINVAL;
+    }
+
+    v = READ_ONCE(page->private);
+    access_count = swmc_access_count(v);
+    last_accessed_age = swmc_last_accessed_age(v);
+
+    /* Age the access count based on last accessed age */
+    if (monitoring_age > last_accessed_age) {
+        unsigned short age_diff = monitoring_age - last_accessed_age;
+        access_count >>= age_diff; // Divide by 2^age_diff
+    }
+
+    /* Increment access count */
+    new_access_count = (unsigned long)access_count + 1;
+
+    /* Update last accessed age */
+    last_accessed_age = monitoring_age;
+
+    /* Update the private field */
+    page->private = (new_access_count << 32) | ((unsigned long)last_accessed_age << 16) | (v & SWMC_TAG_MASK);
+
+    /* Update histogram */
+    int new_msb_index = fls64(new_access_count) - 1; // fls64 returns 1-based index
+    int old_msb_index = fls64(access_count) - 1;
+    if (new_msb_index != old_msb_index) {
+        hist[old_msb_index]--;
+        hist[new_msb_index]++;
+    }
+
+    /* Check if access count exceeds hotness threshold */
+    if (new_msb_index >= hotness_threshold) {
+        add_page_to_list(&replication_candidate, page);
+    }
+
+    return 0;
+}
+
+static unsigned long calculate_hotness_threshold(unsigned long percentile)
+{
+    unsigned long total_samples = 0;
+    unsigned long target_samples;
+    unsigned long cumulative_samples = 0;
+    int i;
+
+    /* Calculate total samples */
+    for (i = 0; i < 32; i++) {
+        total_samples += hist[i];
+    }
+
+    if (total_samples == 0) {
+        pr_info("[Info]%s: No samples collected yet, using default threshold\n", __func__);
+        return hotness_threshold; // No samples yet
+    }
+
+    target_samples = (total_samples * percentile) / 100;
+
+    /* Find the hotness threshold */
+    for (i = 31; i >= 0; i--) {
+        cumulative_samples += hist[i];
+        if (cumulative_samples >= target_samples) {
+            pr_info("[Info]%s: New hotness threshold calculated: %d (cumulative_samples=%lu)\n",
+                    __func__, i, cumulative_samples);
+            return i;
+        }
+    }
+
+    pr_info("[Info]%s: Using lowest hotness threshold (0)\n", __func__);
+    return 0; // Fallback to lowest threshold
+}
+
+#define CPUS_PER_SOCKET 16
+#define BUFFER_SIZE	4096 /* 128: 1MB */
+
+/* pebs events */
+#define DRAM_LLC_LOAD_MISS  0x1d3
+#define REMOTE_DRAM_LLC_LOAD_MISS   0x2d3
+#define NVM_LLC_LOAD_MISS   0x80d1
+#define ALL_STORES	    0x82d0
+#define ALL_LOADS	    0x81d0
+#define STLB_MISS_STORES    0x12d0
+#define STLB_MISS_LOADS	    0x11d0
+#define LLC_LOAD_MISS 0x20d1
+
+enum events {
+    ALL_LOAD = 0,
+    ALL_STORE = 1,
+    N_PEBSEVENTS
+};
+
+static __u64 get_pebs_event(enum events e)
+{
+    switch (e) {
+        case ALL_LOAD:
+            return ALL_LOADS;
+        case ALL_STORE:
+            return ALL_STORES;
+        default:
+            return N_PEBSEVENTS;
+    }
+}
+
+static struct task_struct *replcation_daemon;
+static struct perf_event ***mem_event;
+
+struct pebs_sample {
+    struct perf_event_header header;
+    __u64 ip;
+    __u32 pid, tid;
+    __u64 addr;
+    __u64 phys_addr;
+};
+
+static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, int sampling_interval)
+{
+    struct perf_event_attr attr;
+    struct file *file;
+    int event_fd;
+
+    memset(&attr, 0, sizeof(struct perf_event_attr));
+
+    attr.type = PERF_TYPE_RAW;
+    attr.size = sizeof(struct perf_event_attr);
+    attr.config = config;
+	attr.sample_period = sampling_interval;
+    attr.sample_type = PERF_SAMPLE_IP | PERF_SAMPLE_TID | PERF_SAMPLE_ADDR | PERF_SAMPLE_PHYS_ADDR;
+    attr.disabled = 0;
+    attr.exclude_kernel = 1;
+    attr.exclude_hv = 1;
+    attr.exclude_callchain_kernel = 1;
+    attr.exclude_callchain_user = 1;
+    attr.precise_ip = 2;
+    attr.enable_on_exec = 1;
+    attr.inherit = 1;
+
+    event_fd = swmc__perf_event_open(&attr, -1, cpu, -1, 0);
+    if (event_fd <= 0) {
+        pr_err("[Err]%s: event_fd: %d\n", __func__, event_fd);
+        return -1;
+    }
+
+    file = fget(event_fd);
+    if (!file) {
+        pr_err("[Err]%s: invalid file\n", __func__);
+        return -1;
+    }
+    mem_event[cpu][type] = fget(event_fd)->private_data;
+    return 0;
+}
+
+static int __pebs_init(int sampling_interval)
+{
+    int cpu, event;
+
+    mem_event = kzalloc(sizeof(struct perf_event **) * CPUS_PER_SOCKET, GFP_KERNEL);
+    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+	mem_event[cpu] = kzalloc(sizeof(struct perf_event *) * N_PEBSEVENTS, GFP_KERNEL);
+    }
+
+    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {       
+        // to disable PEBS of node 1 cpus
+        if ((cpu >= 16 && cpu < 32) || (cpu >= 48 && cpu < 64)) {
+            continue;
+        }
+        for (event = 0; event < N_PEBSEVENTS; event++) {
+            if (get_pebs_event(event) == N_PEBSEVENTS) {
+            mem_event[cpu][event] = NULL;
+            continue;
+            }
+            if (__perf_event_open(get_pebs_event(event), cpu, event, sampling_interval)) return -1;
+            if (swmc__perf_event_init(mem_event[cpu][event], BUFFER_SIZE)) return -1;
+        }
+    }
+    return 0;
+}
+
+static void __pebs_cleanup(void)
+{
+    int cpu, event;
+    pr_info("[Info]%s: Cleaning up PEBS events\n", __func__);
+    for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+        for (event = 0; event < N_PEBSEVENTS; event++) {
+            if (mem_event[cpu][event]) {
+                pr_info("[Info]%s: Disabling PEBS event for CPU %d, event %d\n", __func__, cpu, event);
+                perf_event_disable(mem_event[cpu][event]);
+            }
+        }
+    }
+}
+
+
+static int kreplicationd(void *data)
+{
+    pr_info("[Info]%s: kreplicationd thread started\n", __func__);
+    float useful_sample_ratio;
+    int nr_sample, nr_incxl, nr_outcxl, nr_throttle, nr_unthrottle, nr_lost, nr_none; //add counter for invalid va sample events
+    nr_sample = nr_incxl = nr_outcxl = nr_throttle = nr_unthrottle = nr_lost = nr_none = 0;
+    init_page_list(&replication_candidate);
+    init_page_list(&eviction_list);
+    init_page_list(&replication_list);
+
+    //set clock for replication interval
+    unsigned long last_replication_time = jiffies;
+    unsigned long current_time;
+    while (!kthread_should_stop()) {
+        int cpu, event, cond = false;
+        
+        for (cpu = 0; cpu < CPUS_PER_SOCKET; cpu++) {
+            for (event = 0; event < N_PEBSEVENTS; event++) {
+                do {
+                    struct perf_buffer *rb;
+                    struct perf_event_mmap_page *up;
+                    struct perf_event_header *ph;
+                    struct pebs_sample *te;
+                    unsigned long pg_index, offset;
+                    int page_shift;
+                    __u64 head;
+
+                    if (!mem_event[cpu][event]) {
+                        break;
+                    }
+
+                    __sync_synchronize();
+
+                    rb = mem_event[cpu][event]->rb;
+                    if (!rb) {
+                        return -1;
+                    }
+
+                    up = READ_ONCE(rb->user_page);
+                    head = READ_ONCE(up->data_head);
+                    if (head == up->data_tail) {
+                        break;
+                    }
+
+                    head -= up->data_tail;
+                    if (head > (BUFFER_SIZE * 50 / 100)) {
+                        cond = true;
+                    } else if (head < (BUFFER_SIZE * 10 / 100)) {
+                        cond = false;
+                    }
+
+                    smp_rmb();
+
+                    page_shift = PAGE_SHIFT + page_order(rb);
+                    offset = READ_ONCE(up->data_tail);
+                    pg_index = (offset >> page_shift) & (rb->nr_pages - 1);
+                    offset &= (1 << page_shift) - 1;
+
+                    ph = (void*)(rb->data_pages[pg_index] + offset);
+                    nr_sample++;
+                    switch (ph->type) {
+                    case PERF_RECORD_SAMPLE:
+                        te = (struct pebs_sample *)ph;
+                        pr_info("[Info]%s: PEBS sample: ip=0x%llx, pid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
+                            __func__, te->ip, te->pid, te->tid, te->addr, te->phys_addr);
+                        if(!handle_sampled_address(te->phys_addr)) {
+                            nr_incxl++;
+                        } else {
+                            nr_outcxl++;
+                        }
+                        break;
+                    case PERF_RECORD_THROTTLE:
+                        nr_throttle++;
+                        break;
+                    case PERF_RECORD_UNTHROTTLE:
+                        nr_unthrottle++;
+                        break;
+                    case PERF_RECORD_LOST_SAMPLES:
+                        nr_lost++;
+                        break;
+                    default:
+                        nr_none++;
+                        break;
+                    }
+                    smp_mb();
+                    WRITE_ONCE(up->data_tail, up->data_tail + ph->size);
+                } while (cond);
+            }
+        }
+        msleep_interruptible(100);
+        if (time_after(jiffies, last_replication_time + msecs_to_jiffies(replication_interval * 1000))) {
+            pr_info("[Info]%s: Replication interval reached, processing replication candidates\n", __func__);
+            // Step 2-1: Process active and inactive replica lists for eviction
+            get_eviction_list(&eviction_list, hotness_threshold);
+            evict_pages(&eviction_list);
+
+            // Step 2-2: Process replication candidates
+            unsigned long i;
+            for (i = 0; i < replication_candidate.count; i++) {
+                struct page *page = replication_candidate.pages[i];
+                struct page *replica = get_replica_opt(page);
+                if (!replica) {
+                    add_page_to_list(&replication_list, page);
+                }
+            }
+            clear_page_list(&replication_candidate);
+
+            // Step 2-3: Replicate pages
+            replicate_pages(&replication_list);
+
+            // Step 2-4: Increment monitoring age
+            monitoring_age++;
+
+            // Step 2-5: Set hotness threshold 
+            hotness_threshold = calculate_hotness_threshold(hot_page_percentile);
+
+            // Step 2-6: Cool down histogram
+            for (int j = 1; j < 32; j++) {
+                hist[j-1] += hist[j];
+                hist[j] = 0;
+            }
+
+            // Step 2-7: Update last replication time
+            last_replication_time = jiffies;
+        }
+    }
+    pr_info("[Info]%s: PEBS sample stats: total=%d, incxl=%d, outcxl=%d, throttle=%d, unthrottle=%d, lost=%d, none=%d\n",
+        __func__, nr_sample, nr_incxl, nr_outcxl, nr_throttle, nr_unthrottle, nr_lost, nr_none);
+    pr_info("[Info]%s: kreplicationd thread stoped\n", __func__);
+    free_page_list(&replication_candidate);
+    free_page_list(&eviction_list);
+    free_page_list(&replication_list);
+    return 0;
+}
+
+int swmc_replicationd_start(int sampling_interval)
+{
+    pr_info("[Info]%s: Initializing replication daemon\n", __func__);
+
+    if (__pebs_init(sampling_interval)){
+        pr_err("[Error]%s: Failed to initialize PEBS module\n", __func__);
+        return -EINVAL;
+    }
+
+    if (replcation_daemon) {
+        pr_err("[Error]%s: Access sampling task already running\n", __func__);
+        return -EBUSY;
+    }
+
+    replcation_daemon = kthread_run(kreplicationd, NULL, "kreplicationd");
+    if (IS_ERR(replcation_daemon)) {
+        pr_err("[Error]%s: Failed to create access sampling task\n", __func__);
+        __pebs_cleanup();
+        return PTR_ERR(replcation_daemon);
+    }
+
+    pr_info("[Info]%s: Replication daemon started successfully\n", __func__);
+    return 0;
+}
+
+void swmc_replicationd_stop(void)
+{
+    pr_info("[Info]%s: Stopping replication daemon\n", __func__);
+
+    if (replcation_daemon) {
+        kthread_stop(replcation_daemon);
+        replcation_daemon = NULL;
+        pr_info("[Info]%s: Replication daemon stopped\n", __func__);
+    } else {
+        pr_warn("[Warning]%s: Replication daemon not running\n", __func__);
+    }
+
+    __pebs_cleanup();
+}
+
+SYSCALL_DEFINE1(replication_start, int, sampling_interval, int, hot_page_percentage)
+{ 
+	int ret;
     
-//     /* Second: get reference to prevent freeing using unified helper */
-//     meta = get_page_replica_meta(page_replica);
-//     if (meta) {
-//         if (meta->order != order) {
-//             pr_err("[%s] Mismatched order for replica page %p: expected %u, got %u\n",
-//                    __func__, page_replica, order, meta->order);
-//             return NULL; // Order mismatch, return NULL
-//         }
-//         pr_info("[%s] Found page replica %p for original pfn %lu (with reference)\n", 
-//                 __func__, page_replica, pfn_key);
-//         return page_replica;
-//     } else {
-//         /* Failed: page was freed or being freed */
-//         return NULL;
-//     }
-// } 
-// EXPORT_SYMBOL(get_page_replica_with_ref);
+    ret = swmc_replicationd_start(sampling_interval); 
 
-// /**
-//  * put_page_replica_ref - Release reference obtained from find_page_replica_with_ref()
-//  * @page_replica: Page replica to release reference for
-//  *
-//  * This function must be called for every page replica returned by
-//  * find_page_replica_with_ref() to release the reference and prevent memory leaks.
-//  */
-// void put_page_replica_ref(struct page *page_replica)
-// {
-//     struct page_replica_meta *meta;
-    
-//     if (!page_replica)
-//         return;
+	return ret;
+}
 
-//     meta = xa_load(&replica_meta_xa, (unsigned long)page_replica);
+SYSCALL_DEFINE0(replication_stop)
+{ 
+    swmc_replicationd_stop(); 
 
-//     if (!meta) {
-//         pr_err("[%s] No metadata found for page replica %p during put\n", __func__, page_replica);
-//         return; // No metadata, nothing to do
-//     }
-    
-//     if (unlikely(refcount_dec_and_test(&meta->refcount))) {
-//         pr_err("[%s]: Freeing metadata while handling coherency request should not happen!\n", __func__);
-//         kfree(meta);
-//         pr_err("[%s] Freed metadata for page replica %p\n", __func__, page_replica);
-//     } else {
-//         // pr_info("[%s] Release reference for page replica %p, remaining refcount=%d\n", 
-//         //         __func__, page_replica, refcount_read(&meta->refcount));
-//     }
-// } 
-// EXPORT_SYMBOL(put_page_replica_ref);
-
-// int make_page_replica_dirty(struct page *page_replica)
-// {
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return REPLICA_ERROR_INVAL;
-//     }
-
-//     pr_info("[%s] Making page replica %p dirty\n", __func__, page_replica);
-
-//     struct page_replica_meta *m = get_page_replica_meta(page_replica);
-//     if (!m) {
-//         pr_err("[%s] Failed to get page replica meta for %p\n", __func__, page_replica);
-//         return REPLICA_ERROR_NOMEM;
-//     }
-//     m->dirty = true; // Mark as dirty
-//     put_page_replica_meta(m); // Decrement reference count
-//     return REPLICA_SUCCESS;
-// }
-// EXPORT_SYMBOL(make_page_replica_dirty);
-
-// int __flush_page_replica(struct page *page_replica)
-// {
-//     int ret;
-//     pr_info("[%s] Flushing page replica %p\n", __func__, page_replica);
-
-//     if (!page_replica) {
-//         pr_err("[%s] Invalid page replica pointer\n", __func__);
-//         return REPLICA_ERROR_INVAL;
-//     }
-
-//     ret = writeback_page_replica(page_replica);
-//     if ((ret != REPLICA_SUCCESS) && (ret != REPLICA_SHARED_STATE)) {
-//         pr_err("[%s] Writeback failed for page replica %p: %d\n", __func__, page_replica, ret);
-//         return ret;
-//     }
-
-//     ret = destroy_page_replica(page_replica);
-//     if (ret != REPLICA_SUCCESS) {
-//         pr_err("[%s] Destroy failed for page replica %p: %d\n", __func__, page_replica, ret);
-//         return ret;
-//     }
-
-//     pr_info("[%s] Successfully flushed page replica %p\n", __func__, page_replica);
-//     return REPLICA_SUCCESS;
-// }
+    return 0;
+}
 
 static int __init page_replication_init(void)
 {
@@ -1137,3 +1427,30 @@ static int __init page_replication_init(void)
 }
 
 subsys_initcall(page_replication_init);
+
+/* ========================================================================
+ * Public API for page coherence integration
+ * ======================================================================== */
+
+int fetch_page_replica(struct page *original)
+{
+    int err;
+    size_t size = PAGE_SIZE; // For order 0
+    struct page *page_replica;
+    page_replica = get_replica_opt(original);
+
+    if (!page_replica) {
+        pr_err("[Err]%s: Invalid page replica pointer\n", __func__);
+        return -1;
+    }
+
+    /* Step 2: Copy data from source to replica using unified helper */
+    err = copy_data_page(page_replica, original, 0);
+    if (err) {
+        pr_err("[Err]%s: Data copy failed: %d\n", __func__, err);
+        return err;
+    }
+
+    return 0;
+}
+

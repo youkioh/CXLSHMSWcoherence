@@ -299,7 +299,7 @@ static void check_metadata(struct fault_handle *fh)
         clear_MODIFIED(fh);
     }
 
-    page_replica = get_replica(fh->original_page);
+    page_replica = get_replica_opt(fh->original_page);
     if (page_replica) {
         set_REPLICATED(fh);
     } else {
@@ -375,6 +375,8 @@ static void set_fh_action(struct fault_handle *fh) {
     unsigned int index;
 
     index = fh->fh_flags & 0x1F; // Get lower 5 bits for index
+
+    pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
 
     fh_action = fh_action_table[index];
 
@@ -565,6 +567,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     /* Update flags for remote handling */
     FH_CLEAR_FLAG_ALL(fh);
     set_REMOTE(fh);
+    is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
     set_fh_action(fh);
 
@@ -697,7 +700,12 @@ struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t origi
     return ws;
 }
 
-// TODO: Implement this function
+static void wait_for_async_transaction_completion(struct fault_handle *fh)
+{
+    // TODO: Implement actual wait logic using wait stations or completions
+    msleep(100); // Simulate wait for async transaction completion
+}
+
 // 여기서 transaction을 완료하고, coherence를 맞추기 위한 cache나 page에 대한 flush, fetch 등의 작업까지 담당한다.
 static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr)
 {
@@ -727,8 +735,11 @@ static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr
 
     /* Manage page replica if needed */
     if (is_REPLICATED(fh) && !is_SHARED(fh)) {
-        // TODO: Fetch page replica from original page
-        // ret = fetch_page_replica(fh->original_page, kaddr);
+        ret = fetch_page_replica(fh->original_page);
+        if (ret) {
+            pr_err("[Err]%s: Failed to fetch page replica for pfn=0x%lx, error %d\n", __func__, fh->original_pfn_val, ret);
+            return ret;
+        }
     }
 
     return 0;
@@ -752,24 +763,45 @@ static int issue_page_coherence_transaction_async(struct fault_handle *fh)
     return 0;
 }
 
-// TODO: Implement this function
 static void update_metadata(struct fault_handle *fh)
 {
-    if (is_REPLICATED(fh)) {
-        if (is_NEEDWRITE(fh)) {
-            SetPageModified(fh->original_page);
-            ClearPageShared(fh->original_page);
-        } else { // Shared state
-            SetPageShared(fh->original_page);
-            ClearPageModified(fh->original_page);
+    if (is_REMOTE(fh)) {
+        if (is_REPLICATED(fh)) {
+            // TODO: Handle replicated case
+            // if (is_NEEDWRITE(fh)) {
+            //     SetPage(fh->original_page);
+            //     ClearPageShared(fh->original_page);
+            // } else { // Shared state
+            //     SetPageShared(fh->original_page);
+            //     ClearPageModified(fh->original_page);
+            // }
+        } else {
+            if (is_NEEDWRITE(fh)) {
+                ClearPageModified(fh->original_page);
+                ClearPageShared(fh->original_page);
+            } else {
+                ClearPageModified(fh->original_page);
+                SetPageShared(fh->original_page);
+            }
         }
     } else {
-        if (is_NEEDWRITE(fh)) {
-            SetPageModified(fh->original_page);
-            ClearPageShared(fh->original_page);
-        } else { // Shared stale state
-            SetPageModified(fh->original_page);
-            SetPageShared(fh->original_page);
+        if (is_REPLICATED(fh)) {
+            // TODO: Handle replicated case
+            // if (is_NEEDWRITE(fh)) {
+            //     SetPageModified(fh->original_page);
+            //     ClearPageShared(fh->original_page);
+            // } else { // Shared state
+            //     SetPageShared(fh->original_page);
+            //     ClearPageModified(fh->original_page);
+            // }
+        } else {
+            if (is_NEEDWRITE(fh)) {
+                SetPageModified(fh->original_page);
+                ClearPageShared(fh->original_page);
+            } else { // Shared stale state
+                SetPageModified(fh->original_page);
+                SetPageShared(fh->original_page);
+            }
         }
     }
 }
@@ -778,12 +810,13 @@ static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
 {
     pfn_t pfn_to_map;
     pfn_t original_pfn = *pfn;
+    unsigned long original_pfn_val = pfn_t_to_pfn(original_pfn);
     struct page *page_replica;
 
     pr_info("[Info]%s: Mapping VPN to replica PFN for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
-    page_replica = get_replica(fh->original_page);
+    page_replica = get_replica_opt(fh->original_page);
     pfn_to_map.val = page_to_pfn(page_replica) | 
-                        (original_pfn & PFN_FLAGS_MASK);
+                        (original_pfn_val & PFN_FLAGS_MASK);
     *pfn = pfn_to_map;
 }
 
@@ -859,10 +892,9 @@ static void put_work_to_workqueue(struct page *async_page, struct wait_station *
 
 static void writeback_page(struct fault_handle *fh)
 {
-    // TODO: is_REPLICATED가 true로 설정되기 위해서 page->private의 LSB가 1 인지 0인지 확인하는 로직이 있는지 확인할 것.
     if (is_REPLICATED(fh)) {
-        // TODO: implement writeback_page_replica in page_raplication.c
-        // writeback_page_replica(fh->original_page)
+        struct page *page_replica = get_replica_opt(fh->original_page);
+        writeback_page_replica(page_replica);
     } else {
         // For non-replicated page, just flush cache lines and clear modified flag
         volatile char *kaddr = kmap(fh->original_page);
@@ -871,14 +903,13 @@ static void writeback_page(struct fault_handle *fh)
         }
         kunmap(fh->original_page);
     }
-    //TODO: update Page Tables related to page replica or original page
     struct vm_area_struct *vma;
     unsigned long pfn_to_clean;
     struct address_space *mapping;
     unsigned long index, end;
     struct page *page_replica = NULL;
     if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
+        page_replica = get_replica_opt(fh->original_page);
         pfn_to_clean = page_to_pfn(page_replica);
         index = page_replica->index;
         mapping = page_replica->mapping;
@@ -899,14 +930,13 @@ static void writeback_page(struct fault_handle *fh)
 
 static void invalidate_page(struct fault_handle *fh)
 {
-    // TODO: update page tables related to page replica or original page
     struct vm_area_struct *vma;
     unsigned long pfn_to_clean;
     struct address_space *mapping;
     unsigned long index;
     struct page *page_replica = NULL;
     if (is_REPLICATED(fh)) {
-        page_replica = get_replica(fh->original_page);
+        page_replica = get_replica_opt(fh->original_page);
         pfn_to_clean = page_to_pfn(page_replica);
         index = page_replica->index;
         mapping = page_replica->mapping;
@@ -920,7 +950,6 @@ static void invalidate_page(struct fault_handle *fh)
     unmap_mapping_pages(mapping, index, 1, false);
 }
 
-// TODO: Change this to new version
 // Fetch/Invalidate message handling
 // M-> S, S -> S, I -> I
 // S -> I, I -> I (M -> I is violated)
@@ -1062,7 +1091,6 @@ static int swmc_kmsg_handle_error(struct swmc_kmsg_message *msg)
     pr_err("[Err]%s: Received error message from node %d for offset 0x%lx\n", __func__,
            msg->header.from_nid, msg->payload.cxl_hdm_offset);
 
-    // TODO: Handle error appropriately
     return 0;
 }
 
@@ -1136,6 +1164,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         pr_err("[Err]%s: Invalid fault action for local fault\n", __func__);
         __finish_local_fault_handling(fh);
         return -EINVAL;
+    }
+
+    if (fh->fh_action & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
+        pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        wait_for_async_transaction_completion(fh);
     }
 
     /* Issue Transaction */

@@ -65,19 +65,19 @@ void set_cxl_hdm_base(unsigned long base_addr);
 unsigned long get_cxl_hdm_base(void);
 
 /* page_replication.c */
-struct page *get_replica(struct page *original_page);
-void print_page_info(struct page *page, const char *context);
-bool check_page_replica_dirty(struct page *page_replica);
-struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *src_kaddr);
-int destroy_page_replica(struct page *page_replica);
+struct page *get_replica_opt(struct page *original_page);
+// void print_page_info(struct page *page, const char *context);
+// bool check_page_replica_dirty(struct page *page_replica);
+// struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *src_kaddr);
+// int destroy_page_replica(struct page *page_replica);
 int writeback_page_replica(struct page *page_replica);
-int fetch_page_replica(struct page *page_replica, unsigned int order, void *src_kaddr);
-struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order);
-void put_page_replica_ref(struct page *page_replica);
-int make_page_replica_invalid(struct page *page_replica);
-bool is_page_replica_invalid(struct page *page_replica);
-int __flush_page_replica(struct page *page_replica);
-int make_page_replica_dirty(struct page *page_replica);
+int fetch_page_replica(struct page *original);
+// struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order);
+// void put_page_replica_ref(struct page *page_replica);
+// int make_page_replica_invalid(struct page *page_replica);
+// bool is_page_replica_invalid(struct page *page_replica);
+// int __flush_page_replica(struct page *page_replica);
+// int make_page_replica_dirty(struct page *page_replica);
 
 
 // /* Replica folio management functions from page_replication.c */

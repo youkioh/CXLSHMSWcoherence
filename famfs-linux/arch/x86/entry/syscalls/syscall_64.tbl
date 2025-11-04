@@ -391,6 +391,8 @@
 465	common	listxattrat		sys_listxattrat
 466	common	removexattrat		sys_removexattrat
 467 common  flush_replicas      sys_flush_replicas
+468 common  replication_start   sys_replication_start
+469 common  replication_stop    sys_replication_stop
 
 #
 # Due to a historical design error, certain syscalls are numbered differently

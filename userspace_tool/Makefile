@@ -1,15 +1,15 @@
 CC = gcc
 CFLAGS = -Wall -Wextra
 
-TARGET = flush_all
-SRCS = flush_all.c
+all: replication_daemon flush_all
 
-all: $(TARGET)
+replication_daemon: replication_daemon.c
+	$(CC) $(CFLAGS) -o replication_daemon replication_daemon.c
 
-$(TARGET): $(SRCS)
-	$(CC) $(CFLAGS) -o $@ $^
+flush_all: flush_all.c
+	$(CC) $(CFLAGS) -o flush_all flush_all.c
 
 clean:
-	rm -f $(TARGET)
+	rm -f replication_daemon flush_all
 
-.PHONY: all clean
+.PHONY: clean

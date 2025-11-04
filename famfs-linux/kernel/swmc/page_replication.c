@@ -762,12 +762,12 @@ int create_page_replica(struct page *page_original, unsigned int order)
                 __func__, page_to_pfn(page_original));
         goto free_pages;
     }
-    if (PageModified(page_original))
-        SetPageModified(page_replica);
-    if (PageShared(page_original))
-        SetPageShared(page_replica);
-    if (PageCoherence(page_original))
-        SetPageCoherence(page_replica);
+    // if (PageModified(page_original))
+    //     SetPageModified(page_replica);
+    // if (PageShared(page_original))
+    //     SetPageShared(page_replica);
+    // if (PageCoherence(page_original))
+    //     SetPageCoherence(page_replica);
 
     page_replica->memcg_data = page_original;
     page_original->private = page_replica;
@@ -843,12 +843,12 @@ int flush_page_replica(struct page *page_replica)
                 __func__, page_to_pfn(page_replica));
         goto free_pages;
     }
-    if (PageModified(page_replica))
-        SetPageModified(page_original);
-    if (PageShared(page_replica))
-        SetPageShared(page_original);
-    if (PageCoherence(page_replica))
-        SetPageCoherence(page_original);
+    // if (PageModified(page_replica))
+    //     SetPageModified(page_original);
+    // if (PageShared(page_replica))
+    //     SetPageShared(page_original);
+    // if (PageCoherence(page_replica))
+    //     SetPageCoherence(page_original);
 
     page_replica->private = 0; // clear private data
     page_replica->memcg_data = NULL;

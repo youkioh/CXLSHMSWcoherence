@@ -765,43 +765,22 @@ static int issue_page_coherence_transaction_async(struct fault_handle *fh)
 
 static void update_metadata(struct fault_handle *fh)
 {
+    // if replicated or not, same action.
     if (is_REMOTE(fh)) {
-        if (is_REPLICATED(fh)) {
-            // TODO: Handle replicated case
-            // if (is_NEEDWRITE(fh)) {
-            //     SetPage(fh->original_page);
-            //     ClearPageShared(fh->original_page);
-            // } else { // Shared state
-            //     SetPageShared(fh->original_page);
-            //     ClearPageModified(fh->original_page);
-            // }
-        } else {
-            if (is_NEEDWRITE(fh)) {
-                ClearPageModified(fh->original_page);
-                ClearPageShared(fh->original_page);
-            } else {
-                ClearPageModified(fh->original_page);
-                SetPageShared(fh->original_page);
-            }
+        if (is_NEEDWRITE(fh)) { // invalidation
+            ClearPageModified(fh->original_page);
+            ClearPageShared(fh->original_page);
+        } else { // downgrade from M to S
+            SetPageShared(fh->original_page);
+            ClearPageModified(fh->original_page);
         }
     } else {
-        if (is_REPLICATED(fh)) {
-            // TODO: Handle replicated case
-            // if (is_NEEDWRITE(fh)) {
-            //     SetPageModified(fh->original_page);
-            //     ClearPageShared(fh->original_page);
-            // } else { // Shared state
-            //     SetPageShared(fh->original_page);
-            //     ClearPageModified(fh->original_page);
-            // }
-        } else {
-            if (is_NEEDWRITE(fh)) {
-                SetPageModified(fh->original_page);
-                ClearPageShared(fh->original_page);
-            } else { // Shared stale state
-                SetPageModified(fh->original_page);
-                SetPageShared(fh->original_page);
-            }
+        if (is_NEEDWRITE(fh)) {
+            SetPageModified(fh->original_page);
+            ClearPageShared(fh->original_page);
+        } else { // Shared state
+            SetPageShared(fh->original_page);
+            ClearPageModified(fh->original_page);
         }
     }
 }

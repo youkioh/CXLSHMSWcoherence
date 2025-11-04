@@ -199,8 +199,8 @@ enum pageflags {
 	 * Modified = PG_shared = 0, PG_modified = 1
 	 * Shared but stale = PG_shared = 1, PG_modified = 1
 	 */
-	PG_shared = PG_owner_priv_1,
-	PG_modified = PG_owner_2,
+	PG_shared = PG_private,
+	PG_modified = PG_private_2,
 #endif
 };
 

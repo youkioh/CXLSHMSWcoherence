@@ -13259,6 +13259,8 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	int f_flags = O_RDWR;
 	int cgroup_fd = -1;
 
+	printk(KERN_WARNING"[Info]%s: Entered.\n", __func__);
+
 	/* for future expandability... */
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;

@@ -1409,7 +1409,7 @@ void swmc_replicationd_stop(void)
     __pebs_cleanup();
 }
 
-SYSCALL_DEFINE1(replication_start, int, sampling_interval, int, hot_page_percentage)
+SYSCALL_DEFINE2(replication_start, int, sampling_interval, int, hot_page_percentage)
 { 
 	int ret;
     

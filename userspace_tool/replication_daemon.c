@@ -13,18 +13,20 @@ int syscall_replication_stop = 469;
 int main (int argc, char *argv[])
 {
     int sampling_interval;
+    int hot_page_percentage;
 
     if (argv[1] == NULL) {
-        fprintf(stderr, "Usage: %s <start|stop> [sampling_interval]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <start|stop> [sampling_interval] [hot_page_percentage]\n", argv[0]);
         exit(EXIT_FAILURE);
     }
     if (strcmp(argv[1], "start") == 0) {
-        if (argv[2] == NULL) {
-            fprintf(stderr, "Usage: %s start <sampling_interval>\n", argv[0]);
+        if (argv[2] == NULL || argv[3] == NULL) {
+            fprintf(stderr, "Usage: %s start <sampling_interval> <hot_page_percentage>\n", argv[0]);
             exit(EXIT_FAILURE);
         }
         sampling_interval = atoi(argv[2]);
-        long res = syscall(syscall_replication_start, sampling_interval);
+        hot_page_percentage = atoi(argv[3]);
+        long res = syscall(syscall_replication_start, sampling_interval, hot_page_percentage);
         if (res == -1) {
             perror("syscall replication_start");
             exit(EXIT_FAILURE);

@@ -860,7 +860,7 @@ asmlinkage long sys_perf_event_open(
 		struct perf_event_attr __user *attr_uptr,
 		pid_t pid, int cpu, int group_fd, unsigned long flags);
 /* CONFIG_PAGE_COHERENCE*/
-asmlinkage long sys_replication_start(int sampling_interval);
+asmlinkage long sys_replication_start(int sampling_interval, int hot_page_percentage);
 asmlinkage long sys_replication_stop();
 /*******************/
 asmlinkage long sys_accept4(int, struct sockaddr __user *, int __user *, int);

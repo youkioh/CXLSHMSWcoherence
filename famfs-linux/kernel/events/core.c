@@ -13251,9 +13251,10 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;
 
-	err = perf_copy_attr(attr_ptr, &attr);
-	if (err)
-		return err;
+	// err = perf_copy_attr(attr_ptr, &attr);
+	// if (err)
+	// 	return err;
+	attr = *attr_ptr;
 
 	/* Do we allow access to perf_event_open(2) ? */
 	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);

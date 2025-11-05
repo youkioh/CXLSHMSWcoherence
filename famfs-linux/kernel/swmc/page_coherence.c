@@ -571,6 +571,8 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     check_metadata(fh);
     set_fh_action(fh);
 
+    pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
+
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
 
@@ -783,6 +785,7 @@ static void update_metadata(struct fault_handle *fh)
             ClearPageModified(fh->original_page);
         }
     }
+    print_page_info(fh->original_page, "update_metadata");
 }
 
 static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)

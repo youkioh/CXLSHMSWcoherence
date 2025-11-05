@@ -121,15 +121,19 @@ static inline void track_page_free(unsigned int order)
 /* Utility function for debugging */
 void print_page_info(struct page *page, const char *context)
 {
-    pr_info("[%s] page_info in '%s': page=%p, flags=0x%lx, mapping=%p, index=%lu, refcount=%d\n",
+    phys_addr_t phys_addr;
+    phys_addr = __pa(page);
+    pr_info("%s: Printing page info for struct page at physical address: 0x%llx\n",
+            __func__, (unsigned long long)phys_addr);
+    pr_info("%s: page_info in '%s': page=%p, flags=0x%lx, mapping=%p, index=%lu, refcount=%d\n",
             __func__, context, page, page->flags, page->mapping, page->index,
             atomic_read(&page->_refcount));
-    pr_info("[%s] more info with flags: PG_head=%d, PG_dirty=%d, PG_writeback=%d, PG_locked=%d\n",
+    pr_info("%s: more info with flags: PG_head=%d, PG_dirty=%d, PG_writeback=%d, PG_locked=%d\n",
             __func__, PageHead(page), PageDirty(page), PageWriteback(page), PageLocked(page));
     //print raw dump of fields of struct page with hex code
     
-    pr_info("[%s] page[%d-%d]: %lx %lx %lx %lx\n", __func__, 0, 3, ((unsigned long *)page)[0], ((unsigned long *)page)[1], ((unsigned long *)page)[2], ((unsigned long *)page)[3]);
-    pr_info("[%s] page[%d-%d]: %lx %lx %lx %lx\n", __func__, 4, 7, ((unsigned long *)page)[4], ((unsigned long *)page)[5], ((unsigned long *)page)[6], ((unsigned long *)page)[7]);
+    pr_info("%s: page[%d-%d]: %lx %lx %lx %lx\n", __func__, 0, 3, ((unsigned long *)page)[0], ((unsigned long *)page)[1], ((unsigned long *)page)[2], ((unsigned long *)page)[3]);
+    pr_info("%s: page[%d-%d]: %lx %lx %lx %lx\n", __func__, 4, 7, ((unsigned long *)page)[4], ((unsigned long *)page)[5], ((unsigned long *)page)[6], ((unsigned long *)page)[7]);
 }
 EXPORT_SYMBOL(print_page_info);
 

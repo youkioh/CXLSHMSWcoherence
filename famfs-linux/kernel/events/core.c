@@ -12824,15 +12824,21 @@ SYSCALL_DEFINE5(perf_event_open,
 	/* Do we allow access to perf_event_open(2) ? */
 	err = security_perf_event_open(&attr, PERF_SECURITY_OPEN);
 	if (err)
+		pr_info("perf_event_open: security check failed. err=%d.\n", err);
+	if (err)
 		return err;
 
 	if (!attr.exclude_kernel) {
 		err = perf_allow_kernel(&attr);
 		if (err)
+			pr_info("perf_event_open: kernel access not allowed. err=%d.\n", err);
+		if (err)
 			return err;
 	}
 
 	if (attr.namespaces) {
+		if (!perfmon_capable())
+			pr_info("perf_event_open: namespace access not allowed.\n");
 		if (!perfmon_capable())
 			return -EACCES;
 	}
@@ -12849,12 +12855,16 @@ SYSCALL_DEFINE5(perf_event_open,
 	if ((attr.sample_type & PERF_SAMPLE_PHYS_ADDR)) {
 		err = perf_allow_kernel(&attr);
 		if (err)
+			pr_info("perf_event_open: physical address access not allowed. err=%d.\n", err);
+		if (err)
 			return err;
 	}
 
 	/* REGS_INTR can leak data, lockdown must prevent this */
 	if (attr.sample_type & PERF_SAMPLE_REGS_INTR) {
 		err = security_locked_down(LOCKDOWN_PERF);
+		if (err)
+			pr_info("perf_event_open: REGS_INTR not allowed in lockdown mode. err=%d.\n", err);
 		if (err)
 			return err;
 	}
@@ -12872,6 +12882,8 @@ SYSCALL_DEFINE5(perf_event_open,
 		f_flags |= O_CLOEXEC;
 
 	event_fd = get_unused_fd_flags(f_flags);
+	if (event_fd < 0)
+		pr_info("perf_event_open: get_unused_fd_flags failed. err=%d.\n", event_fd);
 	if (event_fd < 0)
 		return event_fd;
 
@@ -13268,8 +13280,11 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	}
 
 	if (attr.namespaces) {
-		if (!perfmon_capable())
+		pr_info("[Info]%s: attr.namespaces is set\n", __func__);
+		if (!perfmon_capable()) {
+			pr_info("[Info]%s: !perfmon_capable\n", __func__);
 			return -EACCES;
+		}
 	}
 
 	if (attr.freq) {
@@ -13370,6 +13385,8 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 		event->event_caps |= PERF_EV_CAP_SOFTWARE;
 
 	if (task) {
+		pr_info("[Info]%s: There is task.\n", __func__);
+		pr_info("[Info]%s: Down read exec_update_lock.\n", __func__);
 		err = down_read_interruptible(&task->signal->exec_update_lock);
 		if (err)
 			goto err_alloc;

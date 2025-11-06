@@ -470,9 +470,10 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
     struct cxl_kmsg_window *win;
     struct swmc_kmsg_message *msg;
     int from_nid, ret;
-    bool found_message = false;
+    bool found_message = true;
 
     while (found_message) {
+        found_message = false;
         /* Poll all RX windows for incoming messages */
         for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
             if (from_nid == ckh->nid) continue; /* Skip self */

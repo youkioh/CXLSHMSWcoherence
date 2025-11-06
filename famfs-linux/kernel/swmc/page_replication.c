@@ -24,6 +24,7 @@
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
 #include <linux/vmstat.h>
+#include <linux/slab.h>
 
 // For PEBS
 #include <linux/perf_event.h>
@@ -903,61 +904,61 @@ unsigned long monitoring_age = 0;
 unsigned long replication_interval = 60; // seconds // TODO: sysfs로 설정 가능하게 만들기
 unsigned long hot_page_percentile = 20; // 상위 20%를 hot으로 간주. TODO: sysfs로 설정 가능하게 만들기
 
-struct page_list {
-    struct page **pages;
-    unsigned long count;
-    unsigned long size;
+/* 각 페이지를 담을 리스트의 '노드' 구조체 */
+struct page_list_node {
+    struct page *page;
+    struct list_head list; // 리스트 연결을 위한 멤버
 };
 
-#define INITIAL_PAGE_LIST_SIZE 1024
+/* 전역 변수 선언 방식 변경
+ * - replication_candidate: 리스트의 시작점(head)
+ * - eviction_list: 제거 후보 리스트의 시작점
+ * - replication_list: 복제 리스트의 시작점
+ */
+LIST_HEAD(replication_candidate);
+LIST_HEAD(eviction_list);
+LIST_HEAD(replication_list);
 
-struct page_list replication_candidate;
-struct page_list eviction_list;
-struct page_list replication_list;
-
-void init_page_list(struct page_list *plist)
+/* 리스트 해제 함수 - 모든 노드를 메모리에서 해제 */
+void free_page_list(struct list_head *head)
 {
-    plist->pages = kmalloc_array(INITIAL_PAGE_LIST_SIZE, sizeof(struct page *), GFP_KERNEL);
-    if (!plist->pages) {
-        pr_err("[Err]%s: Failed to allocate page list\n", __func__);
-        plist->count = 0;
-        plist->size = 0;
+    struct page_list_node *node, *tmp;
+    
+    list_for_each_entry_safe(node, tmp, head, list) {
+        list_del(&node->list);
+        kfree(node);
+    }
+}
+
+/* 리스트에 페이지 추가 */
+void add_page_to_list(struct list_head *head, struct page *page)
+{
+    struct page_list_node *node;
+    
+    node = kmalloc(sizeof(struct page_list_node), GFP_KERNEL);
+    if (!node) {
+        pr_err("[Err]%s: Failed to allocate page list node\n", __func__);
         return;
     }
-    plist->count = 0;
-    plist->size = INITIAL_PAGE_LIST_SIZE;
+    
+    node->page = page;
+    INIT_LIST_HEAD(&node->list);
+    list_add_tail(&node->list, head);
 }
 
-void free_page_list(struct page_list *plist)
+/* 리스트 클리어 - 모든 노드 삭제 */
+void clear_page_list(struct list_head *head)
 {
-    kfree(plist->pages);
-    plist->pages = NULL;
-    plist->count = 0;
-    plist->size = 0;
-}
-
-void add_page_to_list(struct page_list *plist, struct page *page)
-{
-    if (plist->count >= plist->size) {
-        unsigned long new_size = plist->size * 2;
-        struct page **new_pages = krealloc(plist->pages, new_size * sizeof(struct page *), GFP_KERNEL);
-        if (!new_pages) {
-            pr_err("[Err]%s: Failed to realloc page list\n", __func__);
-            return;
-        }
-        plist->pages = new_pages;
-        plist->size = new_size;
+    struct page_list_node *node, *tmp;
+    
+    list_for_each_entry_safe(node, tmp, head, list) {
+        list_del(&node->list);
+        kfree(node);
     }
-    plist->pages[plist->count++] = page;
-}
-
-void clear_page_list(struct page_list *plist)
-{
-    plist->count = 0;
 }
 
 
-static void get_eviction_list(struct page_list *eviction_list, unsigned long threshold)
+static void get_eviction_list(struct list_head *eviction_list, unsigned long threshold)
 {
     unsigned long flags;
     struct page *page;
@@ -987,13 +988,13 @@ static void get_eviction_list(struct page_list *eviction_list, unsigned long thr
     spin_unlock_irqrestore(&replica_lru_lock, flags);
 }
 
-static int evict_pages(struct page_list *eviction_list)
+static int evict_pages(struct list_head *eviction_list)
 {
-    unsigned long i;
+    struct page_list_node *node, *tmp;
     int err;
 
-    for (i = 0; i < eviction_list->count; i++) {
-        struct page *page = eviction_list->pages[i];
+    list_for_each_entry_safe(node, tmp, eviction_list, list) {
+        struct page *page = node->page;
         err = flush_page_replica(page);
         if (err) {
             pr_err("[Err]%s: Failed to flush page replica %p: %d\n", __func__, page, err);
@@ -1004,13 +1005,13 @@ static int evict_pages(struct page_list *eviction_list)
     return 0;
 }
 
-static int replicate_pages(struct page_list *replication_list)
+static int replicate_pages(struct list_head *replication_list)
 {
-    unsigned long i;
+    struct page_list_node *node, *tmp;
     int err;
 
-    for (i = 0; i < replication_list->count; i++) {
-        struct page *page = replication_list->pages[i];
+    list_for_each_entry_safe(node, tmp, replication_list, list) {
+        struct page *page = node->page;
         err = create_page_replica(page, 0); // order 0
         if (err) {
             pr_err("[Err]%s: Failed to create page replica for %p: %d\n", __func__, page, err);
@@ -1315,9 +1316,6 @@ static int kreplicationd(void *data)
     float useful_sample_ratio;
     int nr_sample, nr_incxl, nr_outcxl, nr_throttle, nr_unthrottle, nr_lost, nr_none; //add counter for invalid va sample events
     nr_sample = nr_incxl = nr_outcxl = nr_throttle = nr_unthrottle = nr_lost = nr_none = 0;
-    init_page_list(&replication_candidate);
-    init_page_list(&eviction_list);
-    init_page_list(&replication_list);
 
     //set clock for replication interval
     unsigned long last_replication_time = jiffies;
@@ -1415,15 +1413,22 @@ static int kreplicationd(void *data)
             evict_pages(&eviction_list);
 
             // Step 2-2: Process replication candidates
-            unsigned long i;
-            for (i = 0; i < replication_candidate.count; i++) {
-                struct page *page = replication_candidate.pages[i];
+            // 한 번의 순회로 처리: replica가 없으면 replication_list로 이동, 있으면 노드 삭제
+            struct page_list_node *node, *tmp;
+            list_for_each_entry_safe(node, tmp, &replication_candidate, list) {
+                struct page *page = node->page;
                 struct page *replica = get_replica_opt(page);
+                
                 if (!replica) {
-                    add_page_to_list(&replication_list, page);
+                    // replica가 없으면 replication_list로 이동
+                    list_move_tail(&node->list, &replication_list);
+                } else {
+                    // replica가 이미 있으면 노드 삭제
+                    list_del(&node->list);
+                    kfree(node);
                 }
             }
-            clear_page_list(&replication_candidate);
+            // replication_candidate는 이제 비어있음 (모두 이동되거나 삭제됨)
 
             // Step 2-3: Replicate pages
             replicate_pages(&replication_list);
@@ -1447,9 +1452,12 @@ static int kreplicationd(void *data)
     pr_info("[Info]%s: PEBS sample stats: total=%d, incxl=%d, outcxl=%d, throttle=%d, unthrottle=%d, lost=%d, none=%d\n",
         __func__, nr_sample, nr_incxl, nr_outcxl, nr_throttle, nr_unthrottle, nr_lost, nr_none);
     pr_info("[Info]%s: kreplicationd thread stoped\n", __func__);
+    
+    /* Cleanup: free all remaining nodes in the lists */
     free_page_list(&replication_candidate);
     free_page_list(&eviction_list);
     free_page_list(&replication_list);
+    
     return 0;
 }
 

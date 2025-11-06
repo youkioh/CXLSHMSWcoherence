@@ -470,37 +470,40 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
     struct cxl_kmsg_window *win;
     struct swmc_kmsg_message *msg;
     int from_nid, ret;
+    bool found_message = false;
 
-    /* Poll all RX windows for incoming messages */
-    for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
-        if (from_nid == ckh->nid) continue; /* Skip self */
-
-        win = ckh->win_rx[from_nid];
-        if (!win) continue;
-
-        if (win_get(win, &msg) == 0) {  /* Changed: check return value properly */
-            /* Validate message before processing */
-            if (!msg) {
-                pr_err("%s: Received NULL message from node %d\n", MODULE_NAME, from_nid);
-                continue;
-            }
-            pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
-                    MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
-            
-            /* Additional validation for message header */
-            if (msg->header.type < 0 || msg->header.type >= SWMC_KMSG_TYPE_MAX) {
-                pr_err("%s: Invalid message type %d from node %d (hex: 0x%x)\n", 
-                       MODULE_NAME, msg->header.type, from_nid, msg->header.type);
-                continue;
-            }
-            
-            ret = swmc_kmsg_process_message(msg);
-            
-            smp_mb();
-            
-            if (ret) {
-                pr_info(KERN_WARNING "%s: Failed to process message from node %d: %d\n", 
-                       MODULE_NAME, from_nid, ret);
+    while (found_message) {
+        /* Poll all RX windows for incoming messages */
+        for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
+            if (from_nid == ckh->nid) continue; /* Skip self */
+    
+            win = ckh->win_rx[from_nid];
+            if (!win) continue;
+    
+            if (win_get(win, &msg) == 0) {  /* Changed: check return value properly */
+                /* Validate message before processing */
+                if (!msg) {
+                    pr_err("%s: Received NULL message from node %d\n", MODULE_NAME, from_nid);
+                    continue;
+                }
+                pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
+                        MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
+                
+                /* Additional validation for message header */
+                if (msg->header.type < 0 || msg->header.type >= SWMC_KMSG_TYPE_MAX) {
+                    pr_err("%s: Invalid message type %d from node %d (hex: 0x%x)\n", 
+                           MODULE_NAME, msg->header.type, from_nid, msg->header.type);
+                    continue;
+                }
+                found_message = true;
+                ret = swmc_kmsg_process_message(msg);
+                
+                smp_mb();
+                
+                if (ret) {
+                    pr_info(KERN_WARNING "%s: Failed to process message from node %d: %d\n", 
+                           MODULE_NAME, from_nid, ret);
+                }
             }
         }
     }
@@ -519,6 +522,7 @@ static int recv_handler(void *arg)
 
     while (!kthread_should_stop()) {
         msleep(1); /* Polling interval: 1ms */
+        // usleep_range(100, 200); /* Polling interval: 100-200us */
         cxl_kmsg_receive(ckh);
     }
     

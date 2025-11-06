@@ -393,6 +393,8 @@
 467 common  flush_replicas      sys_flush_replicas
 468 common  replication_start   sys_replication_start
 469 common  replication_stop    sys_replication_stop
+470 common  enable_page_coherence sys_enable_page_coherence
+471 common  disable_page_coherence sys_disable_page_coherence
 
 #
 # Due to a historical design error, certain syscalls are numbered differently

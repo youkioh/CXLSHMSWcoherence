@@ -862,6 +862,8 @@ asmlinkage long sys_perf_event_open(
 /* CONFIG_PAGE_COHERENCE*/
 asmlinkage long sys_replication_start(int sampling_interval, int hot_page_percentage);
 asmlinkage long sys_replication_stop();
+asmlinkage long sys_enable_page_coherence();
+asmlinkage long sys_disable_page_coherence();
 /*******************/
 asmlinkage long sys_accept4(int, struct sockaddr __user *, int __user *, int);
 asmlinkage long sys_recvmmsg(int fd, struct mmsghdr __user *msg,

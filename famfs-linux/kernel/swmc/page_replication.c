@@ -31,11 +31,6 @@
 static LIST_HEAD(replica_active_lru);
 static LIST_HEAD(replica_inactive_lru);
 static DEFINE_SPINLOCK(replica_lru_lock);
-static DEFINE_XARRAY(replica_meta_xa);
-
-/* XArrays for page mapping */
-static DEFINE_XARRAY(original_to_replica_xa);
-static DEFINE_XARRAY(replica_to_original_xa);
 
 /* Constants for replica management */
 #define MAX_ALLOCATE_RETRIES             3
@@ -904,7 +899,7 @@ free_pages:
 unsigned long hist [32];
 unsigned long hotness_threshold = 10; // MSB index 기준.
 unsigned long monitoring_age = 0;
-unsigned long replication_interval = 10; // seconds // TODO: sysfs로 설정 가능하게 만들기
+unsigned long replication_interval = 60; // seconds // TODO: sysfs로 설정 가능하게 만들기
 unsigned long hot_page_percentile = 20; // 상위 20%를 hot으로 간주. TODO: sysfs로 설정 가능하게 만들기
 
 struct page_list {
@@ -1025,7 +1020,7 @@ static int replicate_pages(struct page_list *replication_list)
     return 0;
 }
 
-int handle_sampled_address(unsigned long phys_addr)
+int handle_sampled_address(unsigned long virt_addr, unsigned int pid)
 {
     struct page *page;
     unsigned long pfn;
@@ -1035,14 +1030,64 @@ int handle_sampled_address(unsigned long phys_addr)
     unsigned long new_access_count;
     unsigned long flags;
 
-    pfn = phys_addr >> PAGE_SHIFT;
-    page = pfn_to_page(pfn);
+    // get mm_struct from pid to tranlate virtual address to physical page
+    struct task_struct *task;
+    struct mm_struct *mm;
+    int ret;
+
+    rcu_read_lock();
+    task = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (!task) {
+        rcu_read_unlock();
+        pr_err("[Err]%s: Could not find task for pid %d\n", __func__, pid);
+        return -EINVAL;
+    }
+    get_task_struct(task); // task_struct의 참조 카운트 증가
+    rcu_read_unlock();
+
+    // 2. task_struct에서 mm_struct 가져오기
+    mm = get_task_mm(task);
+    if (!mm) {
+        pr_warn("[Err]%s: Could not get mm_struct for pid %d\n", __func__, pid);
+        put_task_struct(task);
+        return -EINVAL;
+    }
+
+    ret = get_user_pages_remote(
+        mm,         // 대상 메모리 디스크립터
+        virt_addr,      // 찾고자 하는 가상 주소
+        1,          // 가져올 페이지 개수
+        FOLL_WRITE,          // 읽기/쓰기 플래그
+        &page,      // 결과를 저장할 struct page* 배열
+        NULL
+    );
+
+    // get_user_pages_remote는 성공 시 가져온 페이지 수를 반환
+    if (ret <= 0) {
+        // 주소가 매핑되지 않았거나, 스왑 아웃되었거나, 잘못된 주소인 경우
+        pr_err("[Err]%s: vaddr 0x%lx not mapped for pid %d\n", __func__, virt_addr, pid);
+        mmput(mm);
+        put_task_struct(task);
+        return -EINVAL;
+    }
+
+    pr_info("[Info]%s: Sampled vaddr=0x%lx for pid=%d maps to page pfn=0x%lx\n",
+            __func__, virt_addr, pid, page_to_pfn(page));
+
+    // pfn = phys_addr >> PAGE_SHIFT;
+    // page = pfn_to_page(pfn);
     if (!page) {
-        pr_err("[Err]%s: Invalid page for phys_addr=0x%lx\n", __func__, phys_addr);
+        // pr_err("[Err]%s: Invalid page for phys_addr=0x%lx\n", __func__, phys_addr);
+        pr_err("[Err]%s: Could not get page for vaddr=0x%lx, pid=%d\n",
+            __func__, virt_addr, pid);
+        mmput(mm);
+        put_task_struct(task);
         return -EINVAL;
     }
     if (!PageCoherence(page)) {
         pr_info("[Info]%s: Page 0x%lx is not coherence-enabled, skipping\n", __func__, pfn);
+        mmput(mm);
+        put_task_struct(task);
         return -EINVAL;
     }
 
@@ -1078,6 +1123,13 @@ int handle_sampled_address(unsigned long phys_addr)
         add_page_to_list(&replication_candidate, page);
     }
 
+    // 5. 작업 완료 후 페이지 참조 카운트 해제
+    // 매우 중요! 그렇지 않으면 메모리 누수가 발생합니다.
+    put_page(page);
+
+    // 6. 사용이 끝난 구조체들의 참조 카운트 해제
+    mmput(mm);
+    put_task_struct(task);
     return 0;
 }
 
@@ -1174,9 +1226,9 @@ static int __perf_event_open(__u64 config, __u64 cpu, __u64 type, int sampling_i
     attr.exclude_hv = 1;
     attr.exclude_callchain_kernel = 1;
     attr.exclude_callchain_user = 1;
-    attr.precise_ip = 2;
+    attr.precise_ip = 1;
     attr.enable_on_exec = 1;
-    attr.inherit = 1;
+    // attr.inherit = 1;
 
     event_fd = swmc__perf_event_open(&attr, -1, cpu, -1, 0);
     if (event_fd <= 0) {
@@ -1262,6 +1314,7 @@ static int kreplicationd(void *data)
                     __u64 head;
 
                     if (!mem_event[cpu][event]) {
+                        pr_err("[Err]%s: mem_event[%d][%d] is NULL\n", __func__, cpu, event);
                         break;
                     }
 
@@ -1269,12 +1322,14 @@ static int kreplicationd(void *data)
 
                     rb = mem_event[cpu][event]->rb;
                     if (!rb) {
+                        pr_err("[Err]%s: rb is NULL for cpu %d, event %d\n", __func__, cpu, event);
                         return -1;
                     }
 
                     up = READ_ONCE(rb->user_page);
                     head = READ_ONCE(up->data_head);
                     if (head == up->data_tail) {
+                        // pr_info("[Info]%s: No new data in buffer for cpu %d, event %d\n", __func__, cpu, event);
                         break;
                     }
 
@@ -1299,7 +1354,10 @@ static int kreplicationd(void *data)
                         te = (struct pebs_sample *)ph;
                         pr_info("[Info]%s: PEBS sample: ip=0x%llx, pid=%d, tid=%d, addr=0x%llx, phys_addr=0x%llx\n",
                             __func__, te->ip, te->pid, te->tid, te->addr, te->phys_addr);
-                        if(!handle_sampled_address(te->phys_addr)) {
+                        // if(!handle_sampled_address(te->phys_addr)) {
+                        pr_info("[Info]%s: PEBS sample: ip=0x%llx, pid=%d, tid=%d, addr=0x%llx\n",
+                            __func__, te->ip, te->pid, te->tid, te->addr);
+                        if(!handle_sampled_address(te->addr, te->pid)) {
                             nr_incxl++;
                         } else {
                             nr_outcxl++;

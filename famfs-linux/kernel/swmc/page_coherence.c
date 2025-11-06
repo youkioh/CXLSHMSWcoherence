@@ -34,6 +34,7 @@
 #include <swmc/page_replication_info.h>
 #include <swmc/swmc_kmsg.h>
 #include "wait_station.h"
+#include <linux/syscalls.h>
 
 #ifdef CONFIG_PAGE_COHERENCE
 
@@ -47,6 +48,21 @@
 // dummy base PA for CXL HDM 
 static unsigned long cxl_hdm_base;
 pfn_t cxl_hdm_base_pfn;
+static int page_coherence_enabled = 0;
+
+SYSCALL_DEFINE0(enable_page_coherence)
+{
+    page_coherence_enabled = 1;
+    pr_info("[Info]%s: Page coherence enabled\n", __func__);
+    return 0;
+}
+
+SYSCALL_DEFINE0(disable_page_coherence)
+{
+    page_coherence_enabled = 0;
+    pr_info("[Info]%s: Page coherence disabled\n", __func__);
+    return 0;
+}
 
 /**
  * get_cxl_hdm_base - Get the current CXL HDM base address
@@ -1109,6 +1125,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     write = iter->flags & IOMAP_WRITE;
     file = vmf->vma->vm_file;
     filename = file->f_path.dentry->d_name.name;
+
+    if (page_coherence_enabled == 0) {
+        pr_info("[Info]%s: Page coherence handling is disabled, skipping\n", __func__);
+        return 0;
+    }
 
     /* Early return conditions */
     if (pfn_t_to_pfn(original_pfn) < pfn_t_to_pfn(cxl_hdm_base_pfn)) {

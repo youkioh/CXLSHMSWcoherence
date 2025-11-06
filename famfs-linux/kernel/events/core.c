@@ -13301,6 +13301,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 		if (attr.sample_period & (1ULL << 63))
 			return -EINVAL;
 	}
+	printk(KERN_WARNING"[Info]%s: attr.freq check passed.\n", __func__);
 
 	/* Only privileged users can get physical addresses */
 	// if ((attr.sample_type & PERF_SAMPLE_PHYS_ADDR)) {
@@ -13331,6 +13332,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	event_fd = get_unused_fd_flags(f_flags);
 	if (event_fd < 0)
 		return event_fd;
+	printk(KERN_WARNING"[Info]%s: get_unused_fd_flags succeeded. event_fd=%d.\n", __func__, event_fd);
 
 	CLASS(fd, group)(group_fd);     // group_fd == -1 => empty
 	if (group_fd != -1) {
@@ -13362,6 +13364,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	if (flags & PERF_FLAG_PID_CGROUP)
 		cgroup_fd = pid;
 
+	printk(KERN_WARNING"[Info]%s: Calling perf_event_alloc.\n", __func__);
 	event = perf_event_alloc(&attr, cpu, task, group_leader, NULL,
 				 NULL, NULL, cgroup_fd);
 	if (IS_ERR(event)) {
@@ -13380,6 +13383,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	 * Special case software events and allow them to be part of
 	 * any hardware group.
 	 */
+	printk(KERN_WARNING"[Info]%s: Handling software event case.\n", __func__);
 	pmu = event->pmu;
 
 	if (attr.use_clockid) {
@@ -13412,6 +13416,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	/*
 	 * Get the target context (task or percpu):
 	 */
+	printk(KERN_WARNING"[Info]%s: Getting target context.\n", __func__);
 	ctx = find_get_context(task, event);
 	if (IS_ERR(ctx)) {
 		err = PTR_ERR(ctx);
@@ -13440,6 +13445,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 		}
 	}
 
+	printk(KERN_WARNING"[Info]%s: Checking group leader conditions.\n", __func__);
 	if (group_leader) {
 		err = -EINVAL;
 
@@ -13509,6 +13515,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	/*
 	 * Now that we're certain of the pmu; find the pmu_ctx.
 	 */
+	printk(KERN_WARNING"[Info]%s: Finding pmu context.\n", __func__);
 	pmu_ctx = find_get_pmu_context(pmu, ctx, event);
 	if (IS_ERR(pmu_ctx)) {
 		err = PTR_ERR(pmu_ctx);
@@ -13532,6 +13539,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 		goto err_context;
 	}
 
+	printk(KERN_WARNING"[Info]%s: Checking exclusive event installable.\n", __func__);
 	/*
 	 * Must be under the same ctx::mutex as perf_install_in_context(),
 	 * because we need to serialize with concurrent event creation.
@@ -13543,6 +13551,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 
 	WARN_ON_ONCE(ctx->parent_ctx);
 
+	printk(KERN_WARNING"[Info]%s: Getting anon inode file.\n", __func__);
 	event_file = anon_inode_getfile("[perf_event]", &perf_fops, event, f_flags);
 	if (IS_ERR(event_file)) {
 		err = PTR_ERR(event_file);
@@ -13554,6 +13563,7 @@ int swmc__perf_event_open (struct perf_event_attr *attr_ptr, pid_t pid,
 	 * This is the point on no return; we cannot fail hereafter. This is
 	 * where we start modifying current state.
 	 */
+	printk(KERN_WARNING"[Info]%s: Finalizing event setup.\n", __func__);
 
 	if (move_group) {
 		perf_remove_from_context(group_leader, 0);

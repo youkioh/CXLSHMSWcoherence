@@ -7,7 +7,7 @@
 
 #define CL_SIZE 64                    /* Cache line size */
 #define SWMC_KMSG_PAYLOAD_SIZE 28        
-#define SWMC_KMSG_WINDOW_OFFSET 0x4000 /* Offset for shared memory windows */
+#define SWMC_KMSG_WINDOW_OFFSET 0x20000 /* Offset for shared memory windows */
 
 /* Error codes for messaging */
 #define SWMC_KMSG_ERR_NOT_READY -ENODEV   /* Messaging subsystem not ready */

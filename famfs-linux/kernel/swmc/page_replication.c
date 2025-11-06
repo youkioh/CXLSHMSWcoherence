@@ -23,7 +23,7 @@
 #include <asm/cacheflush.h>
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
-#include <linux/vmstats.h>
+#include <linux/vmstat.h>
 
 // For PEBS
 #include <linux/perf_event.h>
@@ -1286,7 +1286,7 @@ static void __pebs_cleanup(void)
     }
 }
 
-static void add_rand_pages_to_replication_candidate()
+static void add_rand_pages_to_replication_candidate(void)
 {
     unsigned long nr_free_pages = global_node_page_state(NR_FREE_PAGES);
 

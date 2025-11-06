@@ -721,7 +721,7 @@ retry_broadcast_bm:
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
         msleep(10);
-        goto retry_broadcast-bm;
+        goto retry_broadcast_bm;
     }
 
     return ws;

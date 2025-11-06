@@ -756,34 +756,30 @@ int create_page_replica(struct page *page_original, unsigned int order)
         goto free_pages;
     }
 
-    /* Step 3: Set struct page infomation */
-    page_replica->private = page_original->private & ~SWMC_TAG_MASK; // copy private data except tag bits
-    page_replica->private = page_replica->private | SWMC_TAG_REPLICA_SELF | SWMC_TAG_ACCESS;
-    page_replica->mapping = page_original->mapping;
-    page_replica->index = page_original->index;
+    struct address_space *mapping = page_original->mapping;
+    pgoff_t index = page_original->index;
 
     if (PageModified(page_original) && PageShared(page_original)) {
         pr_info("[Info]%s: Original page 0x%lx is stale shared page, skip replication\n",
                 __func__, page_to_pfn(page_original));
         goto free_pages;
     }
-    // if (PageModified(page_original))
-    //     SetPageModified(page_replica);
-    // if (PageShared(page_original))
-    //     SetPageShared(page_replica);
-    // if (PageCoherence(page_original))
-    //     SetPageCoherence(page_replica);
 
+    /* step 3: Add replica page to LRU*/
+    insert_replica_lru(page_replica);
+
+    /* Step 4: Unmap original page */
+    if (mapping)
+        unmap_mapping_pages(mapping, index, 1 << order, false);
+
+    /* Step 5: Set struct page infomation */
     page_replica->memcg_data = page_original;
     page_original->private = page_replica;
 
-    /* step 4: Add replica page to LRU*/
-    insert_replica_lru(page_replica);
-
-    /* Step 5: Unmap original page */
-    struct address_space *mapping = page_original->mapping;
-    pgoff_t index = page_original->index;
-    unmap_mapping_pages(mapping, index, 1 << order, false);
+    page_replica->mapping = mapping;
+    page_replica->index = index;
+    page_replica->private = page_original->private & ~SWMC_TAG_MASK; // copy private data except tag bits
+    page_replica->private = page_replica->private | SWMC_TAG_REPLICA_SELF | SWMC_TAG_ACCESS;
 
     pr_info("[Info]%s: Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
             __func__, order, page_to_pfn(page_replica), page_to_pfn(page_original));

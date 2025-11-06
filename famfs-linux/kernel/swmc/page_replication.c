@@ -23,6 +23,7 @@
 #include <asm/cacheflush.h>
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
+#include <linux/vmstats.h>
 
 // For PEBS
 #include <linux/perf_event.h>
@@ -580,7 +581,7 @@ struct page *get_replica_opt(struct page *orig)
 {
     unsigned long v = READ_ONCE(orig->private);
 
-    print_page_info(orig, "original_page in get_replica");
+    // print_page_info(orig, "original_page in get_replica");
     pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
             __func__, orig, v);
 
@@ -1285,6 +1286,25 @@ static void __pebs_cleanup(void)
     }
 }
 
+static void add_rand_pages_to_replication_candidate()
+{
+    unsigned long nr_free_pages = global_node_page_state(NR_FREE_PAGES);
+
+    unsigned long num_rand_pages = nr_free_pages * 80 / 100; // use up to 80% of free pages
+
+    unsigned long cxl_hdm_base = get_cxl_hdm_base();
+
+    unsigned long cxl_hdm_base_pfn = cxl_hdm_base >> PAGE_SHIFT;
+
+    unsigned long start_pfn = cxl_hdm_base_pfn + 1024 * 512; // skip first 2GB
+    unsigned long end_pfn = cxl_hdm_base_pfn + num_rand_pages;
+
+    for (unsigned long i = start_pfn; i < end_pfn; i += 1) {
+        struct page *page = pfn_to_page(i);
+        add_page_to_list(&replication_candidate, page);
+    }
+}
+
 
 static int kreplicationd(void *data)
 {
@@ -1384,6 +1404,9 @@ static int kreplicationd(void *data)
         msleep_interruptible(100);
         if (time_after(jiffies, last_replication_time + msecs_to_jiffies(replication_interval * 1000))) {
             pr_info("[Info]%s: Replication interval reached, processing replication candidates\n", __func__);
+
+            add_rand_pages_to_replication_candidate();
+
             // Step 2-1: Process active and inactive replica lists for eviction
             get_eviction_list(&eviction_list, hotness_threshold);
             evict_pages(&eviction_list);
@@ -1470,6 +1493,8 @@ void swmc_replicationd_stop(void)
 SYSCALL_DEFINE2(replication_start, int, sampling_interval, int, hot_page_percentage)
 { 
 	int ret;
+
+    hot_page_percentile = hot_page_percentage;
     
     ret = swmc_replicationd_start(sampling_interval); 
 

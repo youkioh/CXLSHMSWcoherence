@@ -247,7 +247,7 @@ static inline int __fault_hash_key(unsigned long pfn)
 
 static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 {
-    pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx\n", __func__, pfn);
+    // pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx\n", __func__, pfn);
 	struct fault_handle *fh = kmem_cache_alloc(__fault_handle_cache, GFP_ATOMIC);
 	int fk = __fault_hash_key(pfn);
 	
@@ -392,7 +392,7 @@ static void set_fh_action(struct fault_handle *fh) {
 
     index = fh->fh_flags & 0x1F; // Get lower 5 bits for index
 
-    pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
+    // pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
 
     fh_action = fh_action_table[index];
 
@@ -801,7 +801,7 @@ static void update_metadata(struct fault_handle *fh)
             ClearPageModified(fh->original_page);
         }
     }
-    print_page_info(fh->original_page, "update_metadata");
+    // print_page_info(fh->original_page, "update_metadata");
 }
 
 static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
@@ -811,7 +811,7 @@ static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
     unsigned long original_pfn_val = pfn_t_to_pfn(original_pfn);
     struct page *page_replica;
 
-    pr_info("[Info]%s: Mapping VPN to replica PFN for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Mapping VPN to replica PFN for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
     page_replica = get_replica_opt(fh->original_page);
     pfn_to_map.val = page_to_pfn(page_replica) | 
                         (original_pfn_val & PFN_FLAGS_MASK);
@@ -1156,7 +1156,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     /* Check Metadata & get fault handle */
     fh = __start_local_fault_handling(original_pfn, write);
     SetPageCoherence(fh->original_page);
-    pr_info("[Info]%s: PG_coherence = %d for original_page=%p\n", __func__, PageCoherence(fh->original_page), fh->original_page);
+    // pr_info("[Info]%s: PG_coherence = %d for original_page=%p\n", __func__, PageCoherence(fh->original_page), fh->original_page);
 
     if (!fh) {
         pr_err("[Err]%s: Failed to allocate new fault handle\n", __func__);
@@ -1199,7 +1199,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         update_metadata(fh);
     }
 
-    pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
     if (is_REPLICATED(fh)) {
         map_vpn_to_pfn(fh, pfn);

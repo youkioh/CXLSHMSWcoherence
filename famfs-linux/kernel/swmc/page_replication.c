@@ -583,16 +583,17 @@ struct page *get_replica_opt(struct page *orig)
     unsigned long v = READ_ONCE(orig->private);
 
     // print_page_info(orig, "original_page in get_replica");
-    pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
-            __func__, orig, v);
+    // pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
+    //         __func__, orig, v);
 
     if (!v) {
-        pr_info("[Info]%s: not replicated (private==0)\n", __func__);
+        // pr_info("[Info]%s: not replicated (private==0)\n", __func__);
         return NULL;
     }
 
     switch (v & SWMC_TAG_MASK) {
     case SWMC_TAG_PTR: {
+        pr_info("[Info]%s: tag=PTR\n", __func__);
         struct page *rep = swmc_decode_replica_ptr(v);
         pr_info("[Info]%s: replica pointer -> %px\n", __func__, rep);
         return rep;
@@ -732,6 +733,9 @@ int create_page_replica(struct page *page_original, unsigned int order)
     struct page *page_replica;
     int err;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
+
+    pr_info("[Info]%s: Creating page replica for original page %p (order=%u)\n",
+            __func__, page_original, order);
 
     if (get_replica_opt(page_original)) {
         pr_err("[%s] Page %p is already a replica\n", __func__, page_original);

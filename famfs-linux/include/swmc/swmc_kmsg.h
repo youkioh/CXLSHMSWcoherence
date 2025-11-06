@@ -7,7 +7,9 @@
 
 #define CL_SIZE 64                    /* Cache line size */
 #define SWMC_KMSG_PAYLOAD_SIZE 28        
-#define SWMC_KMSG_WINDOW_OFFSET 0x20000 /* Offset for shared memory windows */
+
+/* Window offset will be defined by the message layer module based on actual window size */
+/* Each module should define SWMC_KMSG_WINDOW_OFFSET based on sizeof(cxl_kmsg_window) */
 
 /* Error codes for messaging */
 #define SWMC_KMSG_ERR_NOT_READY -ENODEV   /* Messaging subsystem not ready */

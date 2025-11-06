@@ -653,23 +653,23 @@ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type, pfn_t origin
     payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
 
     // register wait station for this fault
-retry_get_ws:
+retry_get_ws_bmw:
     ws = get_wait_station_multiple(current, node_count - 1);
     if (!ws) {
         pr_info("[Info]%s: Failed to get wait station\n", __func__);
         msleep(1);
-        goto retry_get_ws;
+        goto retry_get_ws_bmw;
     }
     
     // broadcast message
-retry_broadcast:
+retry_broadcast_bmw:
     ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
     if (ret) {
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
         // Continue anyway for now - could implement fallback
         msleep(1);
-        goto retry_broadcast;
+        goto retry_broadcast_bmw;
     }
 
     void *wait_result = wait_at_station(ws);
@@ -705,23 +705,23 @@ struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t origi
     payload.page_order = order;
     payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
 
-retry_get_ws:
+retry_get_ws_bm:
     // register wait station for this fault
     ws = get_wait_station_multiple(current, node_count - 1);
     if (!ws) {
         pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        msleep(1);
-        goto retry_get_ws;
+        msleep(10);
+        goto retry_get_ws_bm;
     }
     
     // broadcast message
-retry_broadcast:
+retry_broadcast_bm:
     ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
     if (ret) {
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
-        msleep(1);
-        goto retry_broadcast;
+        msleep(10);
+        goto retry_broadcast-bm;
     }
 
     return ws;

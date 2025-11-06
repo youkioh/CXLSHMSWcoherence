@@ -30,7 +30,7 @@
  * ============================================================================= */
 
 #define MODULE_NAME "shm_cxl"
-#define CXL_KMSG_RBUF_SIZE 2048        /* Ring buffer size */
+#define CXL_KMSG_RBUF_SIZE 65536        /* Ring buffer size */
 
 /* Multi-node configuration */
 // #define MAX_NODES 4
@@ -168,6 +168,12 @@ struct cxl_kmsg_window {
     volatile unsigned char int_enabled;
     volatile struct swmc_kmsg_message buffer[CXL_KMSG_RBUF_SIZE];
 } __attribute__((packed));
+
+/* Calculate window offset based on actual structure size
+ * Round up to 4KB page boundary for better performance and alignment
+ */
+#define SWMC_KMSG_WINDOW_OFFSET \
+    (((sizeof(struct cxl_kmsg_window) + 0xFFF) >> 12) << 12)  /* Round up to 4KB */
 
 /* CXL kmsg handle structure */
 struct cxl_kmsg_handle {
@@ -547,6 +553,11 @@ static int __init init_cxl_shm(void)
     
     pr_info(KERN_INFO "%s: Loading CXL Shared Memory messaging layer...\n", MODULE_NAME);
     pr_info(KERN_INFO "%s: Using DAX device: %s, Node ID: %d\n", MODULE_NAME, dax_name, node_id);
+    pr_info(KERN_INFO "%s: Ring buffer size: %d messages\n", MODULE_NAME, CXL_KMSG_RBUF_SIZE);
+    pr_info(KERN_INFO "%s: Window structure size: %lu bytes (0x%lx)\n", 
+            MODULE_NAME, sizeof(struct cxl_kmsg_window), sizeof(struct cxl_kmsg_window));
+    pr_info(KERN_INFO "%s: Window offset (aligned): %d bytes (0x%x)\n", 
+            MODULE_NAME, SWMC_KMSG_WINDOW_OFFSET, SWMC_KMSG_WINDOW_OFFSET);
     
     if (node_id < 0 || node_id >= MAX_NODES) {
         pr_info(KERN_ERR "%s: Invalid node_id %d (must be 0-%d)\n", MODULE_NAME, node_id, MAX_NODES-1);

@@ -9,7 +9,7 @@
 
 #include "wait_station.h"
 
-#define MAX_WAIT_STATIONS 1024
+#define MAX_WAIT_STATIONS 65536
 
 static struct wait_station wait_stations[MAX_WAIT_STATIONS];
 

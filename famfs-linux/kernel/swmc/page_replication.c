@@ -1299,6 +1299,9 @@ static void add_rand_pages_to_replication_candidate(void)
     unsigned long start_pfn = cxl_hdm_base_pfn + 1024 * 512; // skip first 2GB
     unsigned long end_pfn = cxl_hdm_base_pfn + num_rand_pages;
 
+    pr_info("[Info]%s: Adding random pages, nr_free_pages=%lu, num_rand_pages=%lu, start_pfn=0x%lx, end_pfn=0x%lx\n",
+            __func__, nr_free_pages, num_rand_pages, start_pfn, end_pfn);
+
     for (unsigned long i = start_pfn; i < end_pfn; i += 1) {
         struct page *page = pfn_to_page(i);
         add_page_to_list(&replication_candidate, page);

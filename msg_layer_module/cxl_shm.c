@@ -30,7 +30,7 @@
  * ============================================================================= */
 
 #define MODULE_NAME "shm_cxl"
-#define CXL_KMSG_RBUF_SIZE 128        /* Ring buffer size */
+#define CXL_KMSG_RBUF_SIZE 2048        /* Ring buffer size */
 
 /* Multi-node configuration */
 // #define MAX_NODES 4

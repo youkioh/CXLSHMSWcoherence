@@ -653,10 +653,12 @@ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type, pfn_t origin
     payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
 
     // register wait station for this fault
+retry_get_ws:
     ws = get_wait_station_multiple(current, node_count - 1);
     if (!ws) {
         pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        return -ENOMEM;
+        msleep(1);
+        goto retry_get_ws;
     }
     
     // broadcast message
@@ -703,11 +705,13 @@ struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t origi
     payload.page_order = order;
     payload.acked_fault_count = atomic64_read(&__local_acked_fault_count);
 
+retry_get_ws:
     // register wait station for this fault
     ws = get_wait_station_multiple(current, node_count - 1);
     if (!ws) {
         pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        return NULL;
+        msleep(1);
+        goto retry_get_ws;
     }
     
     // broadcast message

@@ -1288,9 +1288,9 @@ static void __pebs_cleanup(void)
 
 static void add_rand_pages_to_replication_candidate(void)
 {
-    unsigned long nr_free_pages = global_node_page_state(NR_FREE_PAGES);
+    unsigned long nr_free_pages = 96UL * 1024 * 1024 * 1024 / PAGE_SIZE; // assume 96GB free memory
 
-    unsigned long num_rand_pages = nr_free_pages * 80 / 100; // use up to 80% of free pages
+    unsigned long num_rand_pages = nr_free_pages * hot_page_percentile / 100; // use up to 80% of free pages
 
     unsigned long cxl_hdm_base = get_cxl_hdm_base();
 

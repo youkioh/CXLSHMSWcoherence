@@ -660,11 +660,14 @@ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type, pfn_t origin
     }
     
     // broadcast message
+retry_broadcast:
     ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
     if (ret) {
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
         // Continue anyway for now - could implement fallback
+        msleep(1);
+        goto retry_broadcast;
     }
 
     void *wait_result = wait_at_station(ws);
@@ -708,11 +711,13 @@ struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t origi
     }
     
     // broadcast message
+retry_broadcast:
     ret = swmc_kmsg_broadcast(msg_type, ws->id, &payload);
     if (ret) {
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
-        // Continue anyway for now - could implement fallback
+        msleep(1);
+        goto retry_broadcast;
     }
 
     return ws;

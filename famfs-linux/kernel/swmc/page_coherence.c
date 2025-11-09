@@ -1190,7 +1190,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Issue Transaction */
     // Synchronous transaction if requested or if over threshold
-    if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > MAX_IN_FLIGHT_TRANSACTIONS) {
+    if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
         pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction(fh, kaddr);
         if (ret) {

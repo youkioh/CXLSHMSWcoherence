@@ -593,22 +593,22 @@ struct page *get_replica_opt(struct page *orig)
 
     switch (v & SWMC_TAG_MASK) {
     case SWMC_TAG_PTR: {
-        pr_info("[Info]%s: tag=PTR\n", __func__);
+        // pr_info("[Info]%s: tag=PTR\n", __func__);
         struct page *rep = swmc_decode_replica_ptr(v);
-        pr_info("[Info]%s: replica pointer -> %px\n", __func__, rep);
+        // pr_info("[Info]%s: replica pointer -> %px\n", __func__, rep);
         return rep;
     }
     case SWMC_TAG_ACCESS:
-        pr_info("[Info]%s: access-mode (flags=0x%x, access_count=%u) => no replica\n",
-                __func__, swmc_access_flags(v), swmc_access_count(v));
+        // pr_info("[Info]%s: access-mode (flags=0x%x, access_count=%u) => no replica\n",
+        //         __func__, swmc_access_flags(v), swmc_access_count(v));
         return NULL;
 
     case SWMC_TAG_REPLICA_SELF:
-        pr_info("[Info]%s: this page is a REPLICA itself => no replica-of\n", __func__);
+        // pr_info("[Info]%s: this page is a REPLICA itself => no replica-of\n", __func__);
         return NULL;
 
     default: /* SWMC_TAG_RSVD */
-        pr_warn("[Warn]%s: invalid tag(11b), private=0x%lx\n", __func__, v);
+        // pr_warn("[Warn]%s: invalid tag(11b), private=0x%lx\n", __func__, v);
         return NULL;
     }
 }

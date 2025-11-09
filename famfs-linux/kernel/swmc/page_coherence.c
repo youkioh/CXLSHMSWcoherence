@@ -181,6 +181,8 @@ static struct kobject *page_coherence_kobj;
 #define FAULT_HASH_SIZE 31
 #define FH_ACTION_MAX_FOLLOWER 8
 
+static atomic64_t nr_in_flight_transactions = ATOMIC64_INIT(0);
+
 atomic64_t __local_acked_fault_count = ATOMIC64_INIT(0); // Local ACK count incremented when local handling gets an ACK. lower ACK count means higher priority.
 struct hlist_head faults[FAULT_HASH_SIZE];
 spinlock_t faults_lock[FAULT_HASH_SIZE];
@@ -657,7 +659,7 @@ retry_get_ws_bmw:
     ws = get_wait_station_multiple(current, node_count - 1);
     if (!ws) {
         pr_info("[Info]%s: Failed to get wait station\n", __func__);
-        msleep(1);
+        msleep(10);
         goto retry_get_ws_bmw;
     }
     
@@ -668,7 +670,7 @@ retry_broadcast_bmw:
         pr_info("[Info]%s: Failed to send %s message: %d\n", __func__, 
                msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate", ret);
         // Continue anyway for now - could implement fallback
-        msleep(1);
+        msleep(10);
         goto retry_broadcast_bmw;
     }
 
@@ -1071,6 +1073,7 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
     if (atomic_dec_and_test(&ws->pendings_count)) {
         // All invalidate ACKs received, wake up the wait station
         pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
+        atomic64_dec(&nr_in_flight_transactions); // Decrement in-flight transaction count
         atomic64_inc(&__local_acked_fault_count); // Increment remote ACK count
         if (ws->async_page) {
             // put work to workqueue for daemon to complete async transaction
@@ -1183,8 +1186,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         wait_for_async_transaction_completion(fh);
     }
 
+    int nr_ift = atomic64_read(&nr_in_flight_transactions);
+
     /* Issue Transaction */
-    if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION) {
+    // Synchronous transaction if requested or if over threshold
+    if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > MAX_IN_FLIGHT_TRANSACTIONS) {
         pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction(fh, kaddr);
         if (ret) {
@@ -1192,6 +1198,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
             __finish_local_fault_handling(fh);
             return ret;
         }
+        atomic64_inc(&nr_in_flight_transactions);
     } else if (fh->fh_action & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
         pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
@@ -1200,6 +1207,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
             __finish_local_fault_handling(fh);
             return ret;
         }
+        atomic64_inc(&nr_in_flight_transactions);
     }
 
     /* Update metadata */

@@ -129,6 +129,7 @@ enum pageflags {
 #endif
 #ifdef CONFIG_PAGE_COHERENCE
 	PG_coherence, // for indicating SWMC managed page
+	PG_replicated, // for indicating replicated page
 #endif
 	__NR_PAGEFLAGS,
 
@@ -660,6 +661,7 @@ PAGEFLAG_FALSE(VmemmapSelfHosted, vmemmap_self_hosted)
 
 #ifdef CONFIG_PAGE_COHERENCE
 PAGEFLAG(Coherence, coherence, PF_ANY)
+PAGEFLAG(Replicated, replicated, PF_ANY)
 PAGEFLAG(Shared, shared, PF_ANY)
 PAGEFLAG(Modified, modified, PF_ANY)
 #endif

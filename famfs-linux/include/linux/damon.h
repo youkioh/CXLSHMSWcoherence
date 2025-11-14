@@ -127,6 +127,10 @@ enum damos_action {
 	DAMOS_MIGRATE_HOT,
 	DAMOS_MIGRATE_COLD,
 	DAMOS_STAT,		/* Do nothing but only record the stat */
+#ifdef CONFIG_PAGE_COHERENCE
+	DAMOS_REPLICATE,
+	DAMOS_EVICT,
+#endif
 	NR_DAMOS_ACTIONS,
 };
 

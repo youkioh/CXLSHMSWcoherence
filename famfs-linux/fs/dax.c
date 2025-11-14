@@ -1723,7 +1723,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		struct xa_state *xas, void **entry, bool pmd)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_fault_iter] dax_fault_iter is called, pmd: %d\n", pmd);
+	// pr_info("[dax_fault_iter] dax_fault_iter is called, pmd: %d\n", pmd);
 	const struct iomap *iomap = &iter->iomap;
 	const struct iomap *srcmap = iomap_iter_srcmap(iter);
 	size_t size = pmd ? PMD_SIZE : PAGE_SIZE;
@@ -1756,9 +1756,9 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		return pmd ? VM_FAULT_FALLBACK : dax_fault_return(err);
 
 #ifdef CONFIG_PAGE_COHERENCE
-	pr_info("[Info]%s: TGID=%d, PID=%d, pfn=0x%lx, pmd=%d, write=%d\n",
-		__func__, current->tgid, current->pid,
-		pfn_t_to_pfn(pfn), pmd, write);
+	// pr_info("[Info]%s: TGID=%d, PID=%d, pfn=0x%lx, pmd=%d, write=%d\n",
+	// 	__func__, current->tgid, current->pid,
+	// 	pfn_t_to_pfn(pfn), pmd, write);
 
 	// // entry point to the page coherence management code
 	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
@@ -1853,12 +1853,12 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 	/* insert PTE pfn */
 	if (write) {
 		// sungsu: vmf_insert_mixed_mkwrite is called
-		pr_info("[dax_fault_iter] Call vmf_insert_mixed_mkwrite() for PTE pfn insertion.\n");
+		// pr_info("[dax_fault_iter] Call vmf_insert_mixed_mkwrite() for PTE pfn insertion.\n");
 		return vmf_insert_mixed_mkwrite(vmf->vma, vmf->address, pfn);
 	}
 	// insert PTE pfn
 	// sungsu: vmf_insert_mixed is called
-	pr_info("[dax_fault_iter] Call vmf_insert_mixed() for PTE pfn insertion.\n");
+	// pr_info("[dax_fault_iter] Call vmf_insert_mixed() for PTE pfn insertion.\n");
 	return vmf_insert_mixed(vmf->vma, vmf->address, pfn);
 }
 
@@ -1866,7 +1866,7 @@ static vm_fault_t dax_iomap_pte_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       int *iomap_errp, const struct iomap_ops *ops)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_iomap_pte_fault] dax_iomap_pte_fault called.\n");
+	// pr_info("[dax_iomap_pte_fault] dax_iomap_pte_fault called.\n");
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE(xas, &mapping->i_pages, vmf->pgoff);
 	struct iomap_iter iter = {
@@ -2083,7 +2083,7 @@ vm_fault_t dax_iomap_fault(struct vm_fault *vmf, unsigned int order,
 		    pfn_t *pfnp, int *iomap_errp, const struct iomap_ops *ops)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u\n", order);
+	// pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u\n", order);
 	if (order == 0) {
 		return dax_iomap_pte_fault(vmf, pfnp, iomap_errp, ops);
 	}

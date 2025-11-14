@@ -333,10 +333,11 @@ enum {
     FH_ACTION_ISSUE_ASYNC_TRANSACTION = 0x04,
     FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION = 0x08,
     FH_ACTION_MAP_VPN_TO_PFN = 0x10,
+    FH_ACTION_FETCH_REPLICA = 0x20,
     /* For remote fault */
-    FH_ACTION_WRITEBACK = 0x20,
-    FH_ACTION_INVALIDATE = 0x40,
-    FH_ACTION_RESPOND = 0x80,
+    FH_ACTION_WRITEBACK = 0x40,
+    FH_ACTION_INVALIDATE = 0x80,
+    FH_ACTION_RESPOND = 0x100,
 };
 
 static const unsigned long fh_action_table[32] = {
@@ -359,11 +360,11 @@ static const unsigned long fh_action_table[32] = {
     /* - W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* - W M - */ FH_ACTION_MAP_VPN_TO_PFN,
     /* - W M S */ FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION | FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
-    /* R - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* R - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
     /* R - - S */ FH_ACTION_MAP_VPN_TO_PFN,
     /* R - M - */ FH_ACTION_MAP_VPN_TO_PFN,
     /* R - M S */ FH_ACTION_INVALID,
-    /* R W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* R W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
     /* R W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
     /* R W M - */ FH_ACTION_MAP_VPN_TO_PFN,
     /* R W M S */ FH_ACTION_INVALID,
@@ -412,15 +413,17 @@ static void set_fh_action(struct fault_handle *fh) {
  */
 static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, bool is_write)
 {
-    pr_info("[Info]%s: Starting local fault handling for pid=%d, pfn=0x%lx, is_write=%s\n", __func__, current->pid, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false");
+    // pr_info("[Info]%s: Starting local fault handling for pid=%d, pfn=0x%lx, is_write=%s\n", __func__, current->pid, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false");
 	
     unsigned long flags;
 	struct fault_handle *fh;
 	bool found;
     unsigned long original_pfn_val;
     int fk;
+    struct page *original_page;
 
     original_pfn_val = pfn_t_to_pfn(original_pfn);
+    original_page = pfn_to_page(original_pfn_val);
     found = false;
     fk = __fault_hash_key(original_pfn_val);
 
@@ -455,6 +458,11 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
         spin_lock_irqsave(&faults_lock[fk], flags);
     } else {
         /* Allocate new fault handle */
+        if (!trylock_page(original_page)) {
+            spin_unlock_irqrestore(&faults_lock[fk], flags);
+            // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+            return NULL;
+        }
         fh = __alloc_fault_handle(original_pfn_val);   
     }
     
@@ -471,7 +479,7 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
     set_fh_action(fh);
     
     spin_unlock_irqrestore(&faults_lock[fk], flags);
-    pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
+    // pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
 
     return fh;
@@ -500,11 +508,13 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
         retry = true;
     }
 
-    pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
     hlist_del_init(&fh->list);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+    unlock_page(fh->original_page);
     kmem_cache_free(__fault_handle_cache, fh);
+
     return retry;
 }
 
@@ -523,10 +533,11 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     struct fault_handle *fh;
     bool found = false;
     unsigned long original_pfn_val;
+    struct page *original_page;
+
     original_pfn_val = pfn_t_to_pfn(original_pfn);
-    
+    original_page = pfn_to_page(original_pfn_val);
     int fk = __fault_hash_key(original_pfn_val);
-    
     
     spin_lock_irqsave(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
@@ -574,7 +585,13 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
         return fh;
     }
 
+    
     /* Allocate new fault handle for remote processing */
+    if (!trylock_page(original_page)) {
+        spin_unlock_irqrestore(&faults_lock[fk], flags);
+        // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        return NULL;
+    }
     fh = __alloc_fault_handle(original_pfn_val); 
     if (!fh) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
@@ -589,7 +606,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     check_metadata(fh);
     set_fh_action(fh);
 
-    pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
+    // pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
 
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
@@ -627,6 +644,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
     
+        unlock_page(fh->original_page);
         kmem_cache_free(__fault_handle_cache, fh);
         return true;
     }
@@ -691,7 +709,7 @@ retry_broadcast_bmw:
     return 0;
 }
 
-struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
+static struct wait_station *broadcast_message(enum swmc_kmsg_type msg_type, pfn_t original_pfn, unsigned int order)
 {
     struct wait_station *ws;
     int ret;
@@ -778,7 +796,6 @@ static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr
 static int issue_page_coherence_transaction_async(struct fault_handle *fh)
 {   
     struct wait_station *ws;
-    int ret;
 
     //broadcast fetch message without waiting for ACKs
     ws = broadcast_message(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
@@ -819,14 +836,14 @@ static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
 {
     pfn_t pfn_to_map;
     pfn_t original_pfn = *pfn;
-    unsigned long original_pfn_val = pfn_t_to_pfn(original_pfn);
     struct page *page_replica;
 
-    // pr_info("[Info]%s: Mapping VPN to replica PFN for original_pfn=0x%lx\n", __func__, fh->original_pfn_val);
     page_replica = get_replica_opt(fh->original_page);
     pfn_to_map.val = page_to_pfn(page_replica) | 
-                        (original_pfn_val & PFN_FLAGS_MASK);
+                        (original_pfn.val & PFN_FLAGS_MASK);
     *pfn = pfn_to_map;
+    // pr_info("[Info]%s: page_to_pfn(page_replica)=0x%lx, original_pfn.val & PFN_FLAGS_MASK=0x%llx\n", __func__, page_to_pfn(page_replica), original_pfn.val & PFN_FLAGS_MASK);
+    // pr_info("[Info]%s: Mapped VPN to PFN=0x%lx for original_pfn=0x%lx\n", __func__, pfn_t_to_pfn(pfn_to_map), pfn_t_to_pfn(original_pfn));
 }
 
 // Ring buffer to handle async transaction completions
@@ -939,7 +956,6 @@ static void writeback_page(struct fault_handle *fh)
 
 static void invalidate_page(struct fault_handle *fh)
 {
-    struct vm_area_struct *vma;
     unsigned long pfn_to_clean;
     struct address_space *mapping;
     unsigned long index;
@@ -992,7 +1008,6 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
     long remote_acked_fault_count = payload->acked_fault_count;
     unsigned long flags;
     bool is_write = (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE);
-    struct page *page_replica;
     int fk;
 
     fh = __start_remote_fault_handling(original_pfn, is_write, remote_acked_fault_count, msg->header.from_nid, msg->header.to_nid);
@@ -1126,7 +1141,6 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     // declaration
     struct fault_handle *fh;
     pfn_t original_pfn;
-    pfn_t replica_pfn;
     int ret;
     bool write;
     struct file *file;
@@ -1137,11 +1151,6 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     write = iter->flags & IOMAP_WRITE;
     file = vmf->vma->vm_file;
     filename = file->f_path.dentry->d_name.name;
-
-    if (page_coherence_enabled == 0) {
-        pr_info("[Info]%s: Page coherence handling is disabled, skipping\n", __func__);
-        return 0;
-    }
 
     /* Early return conditions */
     if (pfn_t_to_pfn(original_pfn) < pfn_t_to_pfn(cxl_hdm_base_pfn)) {
@@ -1157,6 +1166,15 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return 0; 
     }
 
+    if (page_coherence_enabled == 0) {
+        // pr_info("[Info]%s: Page coherence handling is disabled, skipping\n", __func__);
+        // pr_info("[Info]%s: Page coherence handling is disabled, check every accessed paged in CXL shared memory to Shared State without coherence transaction issuing\n", __func__);
+        SetPageCoherence(pfn_to_page(pfn_t_to_pfn(original_pfn)));
+        SetPageShared(pfn_to_page(pfn_t_to_pfn(original_pfn)));
+        ClearPageModified(pfn_to_page(pfn_t_to_pfn(original_pfn)));
+        return 0;
+    }
+
     /* Increment fault counters */
     atomic64_inc(&page_coherence_fault_count);
     if (write) {
@@ -1167,13 +1185,15 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Check Metadata & get fault handle */
     fh = __start_local_fault_handling(original_pfn, write);
-    SetPageCoherence(fh->original_page);
+
     // pr_info("[Info]%s: PG_coherence = %d for original_page=%p\n", __func__, PageCoherence(fh->original_page), fh->original_page);
 
     if (!fh) {
-        pr_err("[Err]%s: Failed to allocate new fault handle\n", __func__);
-        return -ENOMEM;
+        pr_info("[Info]%s: Need to retry local fault handling for pfn=0x%lx\n", __func__, original_pfn.val);
+        msleep(1);
+        return VM_FAULT_RETRY;
     }
+    SetPageCoherence(fh->original_page);
 
     if (fh->fh_action == FH_ACTION_INVALID) {
         pr_err("[Err]%s: Invalid fault action for local fault\n", __func__);
@@ -1210,6 +1230,16 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&nr_in_flight_transactions);
     }
 
+    if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
+        pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        ret = fetch_page_replica(fh->original_page);
+        if (ret) {
+            pr_err("[Err]%s: Failed to fetch page replica for pfn=0x%lx, error %d\n", __func__, fh->original_pfn_val, ret);
+            __finish_local_fault_handling(fh);
+            return ret;
+        }
+    }
+
     /* Update metadata */
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
         pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
@@ -1219,6 +1249,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
     if (is_REPLICATED(fh)) {
+        pr_info("[Info]%s: Mapping VPN to replica PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         map_vpn_to_pfn(fh, pfn);
     }
 
@@ -1229,7 +1260,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return VM_FAULT_RETRY;
     }
 
-    pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, fh->original_pfn_val, pfn_t_to_pfn(*pfn));
+    pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, original_pfn.val, pfn_t_to_pfn(*pfn));
     return 0;
 }
 

@@ -629,6 +629,8 @@ static int __init init_cxl_shm(void)
 
         cxl_kmsg_handler->win_rx[i] = shm_window;
         /* Note: Don't initialize RX windows - they're initialized by the sender */
+        /* No! intialize this! */
+        cxl_kmsg_window_init(shm_window);
     }
     
     /* Register messaging operations with page coherence subsystem */

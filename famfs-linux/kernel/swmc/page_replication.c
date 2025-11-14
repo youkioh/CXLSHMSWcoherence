@@ -143,11 +143,11 @@ static int pte_entry_young_and_clear(pte_t *pte, unsigned long addr, unsigned lo
 {
     unsigned long *reference_count = walk->private;
     
-    pr_info("[%s] VMA: %p, addr: 0x%lx, next: 0x%lx, PTE: 0x%lx\n",
-            __func__, walk->vma, addr, next, pte_val(*pte));
+    // pr_info("[%s] VMA: %p, addr: 0x%lx, next: 0x%lx, PTE: 0x%lx\n",
+    //         __func__, walk->vma, addr, next, pte_val(*pte));
     
     if (ptep_test_and_clear_young(walk->vma, addr, pte)) {
-        pr_info("-> Young: Yes\n");
+        // pr_info("-> Young: Yes\n");
         ++(*reference_count);
     }
 
@@ -158,13 +158,13 @@ static int pmd_entry_young_and_clear(pmd_t *pmd, unsigned long addr, unsigned lo
 {
     unsigned long *reference_count = walk->private;
     
-    pr_info("[%s] VMA: %p, addr: 0x%lx, next: 0x%lx, PMD: 0x%lx\n",
-            __func__, walk->vma, addr, next, pmd_val(*pmd));
+    // pr_info("[%s] VMA: %p, addr: 0x%lx, next: 0x%lx, PMD: 0x%lx\n",
+    //         __func__, walk->vma, addr, next, pmd_val(*pmd));
     if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd)) {
-        pr_info("[%s] THP/Devmap PMD: 0x%lx\n", __func__, pmd_val(*pmd));
+        // pr_info("[%s] THP/Devmap PMD: 0x%lx\n", __func__, pmd_val(*pmd));
         
         if (pmdp_test_and_clear_young(walk->vma, addr, pmd)) {
-            pr_info("-> Young: Yes\n");
+            // pr_info("-> Young: Yes\n");
             ++(*reference_count);
         }
         return 1;
@@ -235,7 +235,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
     pgoff_t start_index = page_replica->index;
 
     if (!mapping) {
-        pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
+        // pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
         return false;
     }
 
@@ -262,6 +262,64 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
         return true;
     } else {
         // pr_info("[%s] Page replica %p is not referenced\n", __func__, page_replica);
+        return false;
+    }
+}
+
+/* For DAMON */
+bool check_page_referenced_and_clear(struct page *page)
+{
+    if (!page) {
+        pr_err("[%s] Invalid page replica pointer\n", __func__);
+        return false;
+    }
+    // pr_info("[Info]%s: page is not NULL, pfn=0x%lx\n", __func__, page_to_pfn(page));
+
+    // int page_coherence = PageCoherence(page);
+    // pr_info("[Info]%s: page=0x%lx, page_coherence=%d\n",
+    //         __func__, page_to_pfn(page), page_coherence);
+
+    if (!PageCoherence(page)) {
+        // pr_err("[%s] Page 0x%lx is not a page related to page coherence\n", __func__, page);
+        return false;
+    }
+    // pr_info("[Info]%s: page is a coherence page, pfn=0x%lx\n", __func__, page_to_pfn(page));
+
+    unsigned long reference_count = 0;
+
+    struct address_space *mapping = page->mapping;
+    pgoff_t start_index = page->index;
+
+    if (!mapping) {
+        // pr_err("[%s] Invalid mapping for page 0x%lx\n", __func__, (unsigned long)page);
+        return false;
+    }
+    // pr_info("[Info]%s: mapping is valid for page pfn=0x%lx\n", __func__, page_to_pfn(page));
+
+    i_mmap_lock_read(mapping);
+
+    // 락을 잡은 후 매핑 재검사
+    if (page->mapping != mapping) {
+        pr_warn("[%s] Mapping changed during processing, unlocking and returning\n", __func__);
+        i_mmap_unlock_read(mapping);
+        return false;
+    }
+
+    int ret = walk_page_mapping(mapping, start_index, 1, &young_and_clear_ops, &reference_count);
+
+    i_mmap_unlock_read(mapping);
+
+    if (ret < 0) { // if ret is negetive, it's an error code
+        pr_err("[%s] Failed to walk page mapping for page replica %p: %d\n", __func__, page, ret);
+        return false;
+    }
+    // pr_info("[Info]%s: walk_page_mapping completed for page pfn=0x%lx, reference_count=%lu\n", __func__, page_to_pfn(page), (unsigned long)reference_count);
+
+    if ((unsigned long)reference_count > 0) {
+        // pr_info("[%s] pfn 0x%lx is referenced, count=%lu\n", __func__, page_to_pfn(page), (unsigned long)reference_count);
+        return true;
+    } else {
+        // pr_info("[%s] pfn 0x%lx is not referenced\n", __func__, page_to_pfn(page));
         return false;
     }
 }
@@ -581,6 +639,13 @@ static inline unsigned short swmc_last_accessed_age(unsigned long v) { return (u
 struct page *get_replica_opt(struct page *orig)
 {
     unsigned long v = READ_ONCE(orig->private);
+    struct page *replica;
+    unsigned long pfn;
+
+    if (!PageReplicated(orig)) {
+        // pr_info("[Info]%s: original_page is not replicated (PageReplicated==0)\n", __func__);
+        return NULL;
+    }
 
     // print_page_info(orig, "original_page in get_replica");
     // pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
@@ -591,13 +656,14 @@ struct page *get_replica_opt(struct page *orig)
         return NULL;
     }
 
+    // TODO: Delete this method if PageReplicated is reliable enough
     switch (v & SWMC_TAG_MASK) {
-    case SWMC_TAG_PTR: {
+    case SWMC_TAG_PTR:
         // pr_info("[Info]%s: tag=PTR\n", __func__);
-        struct page *rep = swmc_decode_replica_ptr(v);
+        replica = swmc_decode_replica_ptr(v);
         // pr_info("[Info]%s: replica pointer -> %px\n", __func__, rep);
-        return rep;
-    }
+        break;
+    
     case SWMC_TAG_ACCESS:
         // pr_info("[Info]%s: access-mode (flags=0x%x, access_count=%u) => no replica\n",
         //         __func__, swmc_access_flags(v), swmc_access_count(v));
@@ -611,15 +677,35 @@ struct page *get_replica_opt(struct page *orig)
         // pr_warn("[Warn]%s: invalid tag(11b), private=0x%lx\n", __func__, v);
         return NULL;
     }
+
+    pfn = page_to_pfn(replica);
+    if (!pfn_valid(pfn)) {
+        return NULL;
+    }
+
+    return replica;
 }
 
 struct page *get_original_opt(struct page *page_replica)
 {
     struct page *original;
+    unsigned long pfn;
+    if (!PageReplicated(page_replica)) {
+        // pr_info("[Info]%s: page_replica is not a replicated page (PageReplicated==0)\n", __func__);
+        return NULL;
+    }
+
+    // TODO: Delete this method if PageReplicated is reliable enough
     if (!page_replica->memcg_data){
-        pr_err("[Error]%s: page_replica->memcg_data is NULL for page_replica=0x%lx\n", __func__, (unsigned long)page_replica);
+        // pr_err("[Error]%s: page_replica->memcg_data is NULL for page_replica=0x%lx\n", __func__, (unsigned long)page_replica);
+        return NULL;
     }
     original = page_replica->memcg_data;
+
+    pfn = page_to_pfn(original);
+    if (!pfn_valid(pfn)) {
+        return NULL;
+    }
     return original;
 }
 
@@ -731,22 +817,47 @@ retry_alloc:
 int create_page_replica(struct page *page_original, unsigned int order)
 {
     struct page *page_replica;
-    int err;
+    int err = 0;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
 
-    pr_info("[Info]%s: Creating page replica for original page %p (order=%u)\n",
-            __func__, page_original, order);
+    // pr_info("[Info]%s: Creating page replica for original page %p (order=%u)\n",
+    //         __func__, page_original, order);
+
+    if (!PageCoherence(page_original)) {
+        // pr_info("[%s] Original page %p is not marked for coherence\n", __func__, page_original);
+        return -EPERM;
+    }
+
+    if (!trylock_page(page_original)) {
+        // pr_err("[%s] Original page %p is locked\n", __func__, page_original);
+        err = -EBUSY;
+        goto unlock_page;
+    }
+    if (!PageLocked(page_original)) {
+        pr_err("[%s] Original page %p should be locked after trylock\n", __func__, page_original);
+        err = -EINVAL;
+        goto unlock_page;
+    }
+
+    if (PageModified(page_original) && PageShared(page_original)) {
+        pr_info("[Info]%s: Original pfn 0x%lx is stale shared page, skip replication\n",
+                __func__, page_to_pfn(page_original));
+        err = -EPERM;
+        goto unlock_page;
+    }
 
     if (get_replica_opt(page_original)) {
-        pr_err("[%s] Page %p is already a replica\n", __func__, page_original);
-        return -EINVAL;
+        // pr_err("[%s] Page 0x%lx already has a replica\n", __func__, page_original);
+        err = -EACCES;
+        goto unlock_page;
     }
 
     /* Step 1: Allocate page replica with retry and manual shrinking */
     page_replica = allocate_page_replica_with_retry(order);
     if (!page_replica) {
         pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
-        return -ENOMEM;
+        err = -ENOMEM;
+        goto unlock_page;
     }
 
     /* Step 2: Copy data from original to replica */
@@ -759,20 +870,13 @@ int create_page_replica(struct page *page_original, unsigned int order)
     struct address_space *mapping = page_original->mapping;
     pgoff_t index = page_original->index;
 
-    if (PageModified(page_original) && PageShared(page_original)) {
-        pr_info("[Info]%s: Original page 0x%lx is stale shared page, skip replication\n",
-                __func__, page_to_pfn(page_original));
-        goto free_pages;
-    }
-
     /* step 3: Add replica page to LRU*/
     insert_replica_lru(page_replica);
 
-    /* Step 4: Unmap original page */
-    if (mapping)
-        unmap_mapping_pages(mapping, index, 1 << order, false);
-
-    /* Step 5: Set struct page infomation */
+    /* Step 4: Set struct page infomation */
+    SetPageCoherence(page_replica);
+    SetPageReplicated(page_replica);
+    SetPageReplicated(page_original);
     page_replica->memcg_data = page_original;
     page_original->private = page_replica;
 
@@ -781,12 +885,26 @@ int create_page_replica(struct page *page_original, unsigned int order)
     page_replica->private = page_original->private & ~SWMC_TAG_MASK; // copy private data except tag bits
     page_replica->private = page_replica->private | SWMC_TAG_REPLICA_SELF | SWMC_TAG_ACCESS;
 
-    pr_info("[Info]%s: Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
-            __func__, order, page_to_pfn(page_replica), page_to_pfn(page_original));
+    // pr_info("[Info]%s: Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
+    //         __func__, order, page_to_pfn(page_replica), page_to_pfn(page_original));
 
-    return 0;
+    /* Step 5: Unmap original page */
+    /* TODO: Change Unmapping to remapping */
+    if (mapping)
+        unmap_mapping_pages(mapping, index, 1 << order, false);
+    
+unlock_page:
+    unlock_page(page_original);
+    if(PageLocked(page_original)) {
+        pr_err("[%s] Original page %p is still locked!\n", __func__, page_original);
+    }
+    return err;
 
 free_pages:
+    unlock_page(page_original);
+    if(PageLocked(page_original)) {
+        pr_err("[%s] Original page %p is still locked!\n", __func__, page_original);
+    }
     __free_pages(page_replica, order);
     track_page_free(order);
     return err;
@@ -805,15 +923,15 @@ int writeback_page_replica(struct page *page_replica)
         return -EINVAL;
     }
 
-    pr_info("[Info]%s: Writing back replica page %p to original page %p\n",
-            __func__, page_replica, page_original);
+    // pr_info("[Info]%s: Writing back replica page %p to original page %p\n",
+    //         __func__, page_replica, page_original);
     
     /* Step 1: Copy data from original to replica */
     copy_data_page(page_replica, page_original, order);
 
     /* Step 2: Flush cachelines */
-    pr_info("[Info]%s: Flushing dcache for original page %p\n",
-            __func__, page_original);
+    // pr_info("[Info]%s: Flushing dcache for original page %p\n",
+    //         __func__, page_original);
     flush_dcache_page(page_original);
     return 0;
 }
@@ -823,15 +941,53 @@ int flush_page_replica(struct page *page_replica)
     int order = 0;
     int err;
 
+    
+    struct page *page_original = get_original_opt(page_replica);
+
+    if (!page_original) {
+        // pr_info("[Info]%s: Not replicated page.\n", __func__);
+        return -EACCES;
+    }
+
+    // int page_coherence = PageCoherence(page_original);
+    // pr_info("[Info]%s: page_original=0x%lx, page_coherence=%d\n",
+    //         __func__, page_to_pfn(page_original), page_coherence);
+    if (!PageCoherence(page_original)) {
+        // pr_info("[Info]%s: Original page %p is not marked for coherence, skipping flush.\n",
+        //         __func__, page_original);
+        return -EINVAL;
+    }
+
+    // pr_err("[Err]%s: There should be NO page replica NOW!", __func__);
+    // return -EINVAL;
+    
+    if (PageLocked(page_replica) || PageLocked(page_original)) {
+        // pr_err("[%s] Original or replica page is locked. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
+        return -EBUSY;
+    }
+
+    // trylock_page(page_original);
+    if (!trylock_page(page_original)) {
+        // pr_err("[%s] Original page %p is locked\n", __func__, page_original);
+        unlock_page(page_original);
+        return -EBUSY;
+    }
+
+    if (!PageLocked(page_original)) {
+        pr_err("[%s] Original page %p should be locked after trylock\n", __func__, page_original);
+        unlock_page(page_original);
+        return -EINVAL;
+    }
+
+
     /* Step 1-2: Writeback page replica */
     err = writeback_page_replica(page_replica);
     if (err) {
         pr_err("[Err]%s: Failed to writeback replica page %p: %d\n",
                 __func__, page_replica, err);
+        unlock_page(page_original);
         return err;
     }
-
-    struct page *page_original = get_original_opt(page_replica);
 
     /* Step 3: Set struct page information */
     page_original->private = page_replica->private & ~SWMC_TAG_MASK; // copy private data except tag bits
@@ -839,36 +995,40 @@ int flush_page_replica(struct page *page_replica)
     page_original->mapping = page_replica->mapping;
     page_original->index = page_replica->index;
 
-    if (PageModified(page_replica) && PageShared(page_replica)) {
-        pr_info("[Info]%s: Page replica 0x%lx is stale shared page, skip replication\n",
-                __func__, page_to_pfn(page_replica));
-        goto free_pages;
-    }
-    // if (PageModified(page_replica))
-    //     SetPageModified(page_original);
-    // if (PageShared(page_replica))
-    //     SetPageShared(page_original);
-    // if (PageCoherence(page_replica))
-    //     SetPageCoherence(page_original);
-
     page_replica->private = 0; // clear private data
     page_replica->memcg_data = NULL;
 
     /* step 4: Remove replica page to LRU*/
     remove_replica_lru(page_replica);
 
-    /* Step 5: Unmap page replica */
+    /* Step 5: Clear flags */
+    ClearPageCoherence(page_replica);
+    ClearPageReplicated(page_replica);
+    ClearPageReplicated(page_original);
+
+    /* Step 6: Unmap page replica */
     struct address_space *mapping = page_original->mapping;
     pgoff_t index = page_original->index;
-    unmap_mapping_pages(mapping, index, 1 << order, false);
+    if (mapping)
+        unmap_mapping_pages(mapping, index, 1 << order, false);
 
-    /* Step 6: Free page replica */
-free_pages:
+    page_replica->mapping = NULL;
+    page_replica->index = 0;
+
+    unlock_page(page_original);
+
+    if (PageLocked(page_original)) {
+        pr_err("[%s] Original page %p is still locked!\n", __func__, page_original);
+        return -EINVAL;
+    }
+    
     __free_pages(page_replica, order);
     track_page_free(order);
+    
 
-    pr_info("[Info]%s: Successfully wrote back replica page %p to original pfn %lu\n",
-            __func__, page_replica, page_to_pfn(page_original));
+    // pr_info("[Info]%s: Successfully wrote back replica page %p to original pfn 0x%lx\n",
+    //         __func__, page_replica, page_to_pfn(page_original));
+
 
     return 0;
 }
@@ -1022,7 +1182,7 @@ static int replicate_pages(struct list_head *replication_list)
     return 0;
 }
 
-int handle_sampled_address(unsigned long virt_addr, unsigned int pid)
+static int handle_sampled_address(unsigned long virt_addr, unsigned int pid)
 {
     struct page *page;
     unsigned long pfn;

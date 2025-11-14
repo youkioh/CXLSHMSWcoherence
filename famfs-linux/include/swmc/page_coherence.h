@@ -78,6 +78,10 @@ int fetch_page_replica(struct page *original);
 // bool is_page_replica_invalid(struct page *page_replica);
 // int __flush_page_replica(struct page *page_replica);
 // int make_page_replica_dirty(struct page *page_replica);
+int create_page_replica(struct page *page_original, unsigned int order);
+int flush_page_replica(struct page *page_replica);
+bool check_page_referenced_and_clear(struct page *page);
+
 
 
 // /* Replica folio management functions from page_replication.c */

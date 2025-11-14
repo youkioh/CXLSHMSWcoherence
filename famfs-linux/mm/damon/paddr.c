@@ -19,6 +19,10 @@
 #include "../internal.h"
 #include "ops-common.h"
 
+#ifdef CONFIG_PAGE_COHERENCE
+#include <swmc/page_coherence.h>
+#endif
+
 static bool damon_folio_mkold_one(struct folio *folio,
 		struct vm_area_struct *vma, unsigned long addr, void *arg)
 {
@@ -58,6 +62,17 @@ static void damon_folio_mkold(struct folio *folio)
 
 }
 
+#ifdef CONFIG_PAGE_COHERENCE
+static void damon_pa_mkold(unsigned long paddr)
+{
+	struct page *_page = pfn_to_page(PHYS_PFN(paddr));
+
+	if (!_page)
+		return;
+
+	check_page_referenced_and_clear(_page);
+}
+#else
 static void damon_pa_mkold(unsigned long paddr)
 {
 	struct folio *folio = damon_get_folio(PHYS_PFN(paddr));
@@ -68,6 +83,7 @@ static void damon_pa_mkold(unsigned long paddr)
 	damon_folio_mkold(folio);
 	folio_put(folio);
 }
+#endif /* CONFIG_PAGE_COHERENCE */
 
 static void __damon_pa_prepare_access_check(struct damon_region *r)
 {
@@ -148,6 +164,19 @@ static bool damon_folio_young(struct folio *folio)
 	return accessed;
 }
 
+#ifdef CONFIG_PAGE_COHERENCE
+static bool damon_pa_young(unsigned long paddr, unsigned long *folio_sz)
+{
+	struct page *_page = pfn_to_page(PHYS_PFN(paddr));
+	bool accessed;
+
+	if (!_page)
+		return false;
+
+	accessed = check_page_referenced_and_clear(_page);
+	return accessed;
+}
+#else
 static bool damon_pa_young(unsigned long paddr, unsigned long *folio_sz)
 {
 	struct folio *folio = damon_get_folio(PHYS_PFN(paddr));
@@ -161,6 +190,7 @@ static bool damon_pa_young(unsigned long paddr, unsigned long *folio_sz)
 	folio_put(folio);
 	return accessed;
 }
+#endif /* CONFIG_PAGE_COHERENCE */
 
 static void __damon_pa_check_access(struct damon_region *r,
 		struct damon_attrs *attrs)
@@ -489,6 +519,108 @@ put_folio:
 	return applied * PAGE_SIZE;
 }
 
+static unsigned long damon_pa_replicate(struct damon_region *r, struct damos *s,
+		unsigned long *sz_filter_passed)
+{
+	unsigned long addr, tried, applied, failed, locked, replicated_before, nomem, error;
+	struct page *_page;
+	int node;
+	int err;
+	
+	applied = 0;
+	failed = 0;
+	locked = 0;
+	replicated_before = 0;
+	nomem = 0;
+	error = 0;
+
+	for (addr = r->ar.start; addr < r->ar.end; addr += PAGE_SIZE) {
+		_page = pfn_to_page(PHYS_PFN(addr));
+		node = page_to_nid(_page);
+		// pr_info("[Info]%s: Replicating page pfn=0x%lx, node=%d\n", __func__,
+		// 	page_to_pfn(_page), node);
+
+		err = create_page_replica(_page, 0);
+
+		if (err) {
+			switch (err) {
+			case -EBUSY:
+				locked++;
+				break;
+			case -EINVAL:
+				error++;
+				break;
+			case -EACCES:
+				replicated_before++;
+				break;
+			case -ENOMEM:
+				nomem++;
+				break;
+			default:
+				break;
+			}
+			failed++;
+			continue;
+		}
+		applied++;
+		*sz_filter_passed += PAGE_SIZE;
+	}
+	tried = applied + failed;
+	pr_info("[Info]%s: Replicated %lu pages, failed %lu pages (tried %lu pages, locked %lu pages, already_replicated %lu pages, nomem %lu pages, error %lu pages)\n",
+		__func__, applied, failed, tried, locked, replicated_before, nomem, error);
+	cond_resched();
+	return applied * PAGE_SIZE;
+}
+
+static unsigned long damon_pa_evict(struct damon_region *r, struct damos *s,
+		unsigned long *sz_filter_passed)
+{
+	unsigned long addr, tried, applied, failed, locked, not_replicated, error;
+	struct page *_page;
+	int node;
+	int err;
+
+	applied = 0;
+	failed = 0;
+	locked = 0;
+	not_replicated = 0;
+	error = 0;
+
+	for (addr = r->ar.start; addr < r->ar.end; addr += PAGE_SIZE) {
+		_page = pfn_to_page(PHYS_PFN(addr));
+		node = page_to_nid(_page);
+		// pr_info("[Info]%s: Evicting page pfn=0x%lx, node=%d\n", __func__,
+		// 	page_to_pfn(_page), node);
+		err = flush_page_replica(_page);
+		if (err) {
+			switch (err) {
+			case -EBUSY:
+				locked++;
+				break;
+			case -EACCES:
+				not_replicated++;
+				break;
+			case -EINVAL:
+				error++;
+				break;
+			default:
+				break;
+			}
+			failed++;
+			continue;
+		}
+		applied++;
+		*sz_filter_passed += PAGE_SIZE;
+	}
+
+	tried = applied + failed;
+
+	pr_info("[Info]%s: Evicted %lu pages, failed %lu pages (tried %lu pages, locked %lu pages, not_replicated %lu pages, error %lu pages)\n",
+		__func__, applied, failed, tried, locked, not_replicated, error);
+	cond_resched();
+	return applied * PAGE_SIZE;
+}
+
 static bool damon_pa_scheme_has_filter(struct damos *s)
 {
 	struct damos_filter *f;
@@ -540,6 +672,10 @@ static unsigned long damon_pa_apply_scheme(struct damon_ctx *ctx,
 		return damon_pa_migrate(r, scheme, sz_filter_passed);
 	case DAMOS_STAT:
 		return damon_pa_stat(r, scheme, sz_filter_passed);
+	case DAMOS_REPLICATE:
+		return damon_pa_replicate(r, scheme, sz_filter_passed);
+	case DAMOS_EVICT:
+		return damon_pa_evict(r, scheme, sz_filter_passed);
 	default:
 		/* DAMOS actions that not yet supported by 'paddr'. */
 		break;

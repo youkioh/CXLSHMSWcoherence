@@ -1473,6 +1473,10 @@ static const char * const damon_sysfs_damos_action_strs[] = {
 	"migrate_hot",
 	"migrate_cold",
 	"stat",
+	#ifdef CONFIG_PAGE_COHERENCE
+	"replicate",
+	"evict",
+	#endif
 };
 
 static struct damon_sysfs_scheme *damon_sysfs_scheme_alloc(
@@ -1683,6 +1687,8 @@ static ssize_t action_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	for (action = 0; action < NR_DAMOS_ACTIONS; action++) {
 		if (sysfs_streq(buf, damon_sysfs_damos_action_strs[action])) {
+			pr_info("[Info]%s: action=%s\n", __func__,
+					damon_sysfs_damos_action_strs[action]);
 			scheme->action = action;
 			return count;
 		}

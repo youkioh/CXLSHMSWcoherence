@@ -770,6 +770,25 @@ static int copy_data_page(struct page *src_page, struct page *dst_page, unsigned
 }
 
 /* Helper to allocate pages with retry and shrinking */
+static struct page *allocate_page_replica_no_retry(unsigned int order)
+{
+    struct page *page_replica;
+    gfp_t gfp_flags = GFP_HIGHUSER_MOVABLE | __GFP_ZERO;
+
+    page_replica = alloc_pages(gfp_flags, order);
+    
+    if (unlikely(!page_replica)) {
+
+        // pr_err("[%s] Failed to allocate page replica (order=%u)\n",
+        //     __func__, order);
+        return NULL;
+    }
+
+    track_page_alloc(order);
+    return page_replica;
+}
+
+/* Helper to allocate pages with retry and shrinking */
 static struct page *allocate_page_replica_with_retry(unsigned int order)
 {
     struct page *page_replica;
@@ -853,9 +872,9 @@ int create_page_replica(struct page *page_original, unsigned int order)
     }
 
     /* Step 1: Allocate page replica with retry and manual shrinking */
-    page_replica = allocate_page_replica_with_retry(order);
+    page_replica = allocate_page_replica_no_retry(order);
     if (!page_replica) {
-        pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
+        // pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
         err = -ENOMEM;
         goto unlock_page;
     }

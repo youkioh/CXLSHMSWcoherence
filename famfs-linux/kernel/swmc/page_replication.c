@@ -839,6 +839,13 @@ int create_page_replica(struct page *page_original, unsigned int order)
     int err = 0;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
 
+    long avail_pages = si_mem_available() >> PAGE_SHIFT;
+    long threshold_pages =  (1UL << 30) >> PAGE_SHIFT; // 1GB threshold
+
+    if (avail_pages < threshold_pages) {
+        return -ENOMEM;
+    }
+
     // pr_info("[Info]%s: Creating page replica for original page %p (order=%u)\n",
     //         __func__, page_original, order);
 

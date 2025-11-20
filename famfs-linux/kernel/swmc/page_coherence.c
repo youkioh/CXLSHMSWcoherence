@@ -34,6 +34,7 @@
 #include <linux/sysfs.h>
 #include <linux/pagemap.h>
 #include <linux/delay.h>
+#include <linux/ktime.h>
 
 #ifdef CONFIG_PAGE_COHERENCE
 
@@ -53,6 +54,7 @@ static atomic64_t page_coherence_fault_read_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_handling_time_ns = ATOMIC64_INIT(0);
 
 /**
  * set_cxl_hdm_base - Set the CXL HDM base address
@@ -109,6 +111,12 @@ static ssize_t replica_created_count_show(struct kobject *kobj, struct kobj_attr
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_replica_created_count));
 }
 
+static ssize_t total_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_handling_time_ns));
+}
+
+
 /* Sysfs store function for resetting counters */
 static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute *attr,
                                   const char *buf, size_t count)
@@ -136,6 +144,7 @@ static struct kobj_attribute fault_read_count_attr = __ATTR_RO(fault_read_count)
 static struct kobj_attribute fault_write_count_attr = __ATTR_RO(fault_write_count);
 static struct kobj_attribute replica_found_count_attr = __ATTR_RO(replica_found_count);
 static struct kobj_attribute replica_created_count_attr = __ATTR_RO(replica_created_count);
+static struct kobj_attribute total_handling_time_attr = __ATTR_RO(total_handling_time);
 static struct kobj_attribute reset_counters_attr = __ATTR_WO(reset_counters);
 
 /* Array of attributes for the attribute group */
@@ -145,6 +154,7 @@ static struct attribute *page_coherence_attrs[] = {
     &fault_write_count_attr.attr,
     &replica_found_count_attr.attr,
     &replica_created_count_attr.attr,
+    &total_handling_time_attr.attr,
     &reset_counters_attr.attr,
     NULL,
 };
@@ -763,6 +773,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&page_coherence_fault_read_count);
     }
 
+    ktime_t start, end, diff;
+    start = ktime_get();
+
     if (!vmf || !iter || !kaddr || !pfn) {
         pr_err("[Err]%s: Invalid parameters\n", __func__);
         return -EINVAL;
@@ -1002,6 +1015,9 @@ map_pfn:
         return VM_FAULT_RETRY;
         // goto redo;
     }
+    end = ktime_get();
+    diff = ktime_sub(end, start);
+    atomic64_add(ktime_to_ns(diff), &page_coherence_total_handling_time_ns);
     return 0;
 }
 

@@ -502,6 +502,12 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
                            MODULE_NAME, msg->header.type, from_nid, msg->header.type);
                     continue;
                 }
+
+                if (msg->header.to_nid == msg->header.from_nid) {
+                    pr_err("%s: Message from node %d has same from/to NID (%d)\n", 
+                           MODULE_NAME, from_nid, msg->header.from_nid);
+                    continue;
+                }
                 found_message = true;
                 ret = swmc_kmsg_process_message(msg);
                 

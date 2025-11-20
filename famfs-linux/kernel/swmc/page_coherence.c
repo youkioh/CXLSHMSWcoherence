@@ -35,6 +35,7 @@
 #include <swmc/swmc_kmsg.h>
 #include "wait_station.h"
 #include <linux/syscalls.h>
+#include <linux/ktime.h>
 
 #ifdef CONFIG_PAGE_COHERENCE
 
@@ -100,6 +101,7 @@ static atomic64_t page_coherence_fault_read_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_handling_time_ns = ATOMIC64_INIT(0);
 
 /* Sysfs show functions for fault statistics */
 static ssize_t fault_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
@@ -127,6 +129,11 @@ static ssize_t replica_created_count_show(struct kobject *kobj, struct kobj_attr
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_replica_created_count));
 }
 
+static ssize_t total_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_handling_time_ns));
+}
+
 /* Sysfs store function for resetting counters */
 static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute *attr,
                                   const char *buf, size_t count)
@@ -142,6 +149,7 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_fault_write_count, 0);
         atomic64_set(&page_coherence_replica_found_count, 0);
         atomic64_set(&page_coherence_replica_created_count, 0);
+        atomic64_set(&page_coherence_total_handling_time_ns, 0);
         pr_info("[Info]%s: All fault counters reset\n", __func__);
     }
     
@@ -154,6 +162,7 @@ static struct kobj_attribute fault_read_count_attr = __ATTR_RO(fault_read_count)
 static struct kobj_attribute fault_write_count_attr = __ATTR_RO(fault_write_count);
 static struct kobj_attribute replica_found_count_attr = __ATTR_RO(replica_found_count);
 static struct kobj_attribute replica_created_count_attr = __ATTR_RO(replica_created_count);
+static struct kobj_attribute total_handling_time_attr = __ATTR_RO(total_handling_time);
 static struct kobj_attribute reset_counters_attr = __ATTR_WO(reset_counters);
 
 /* Array of attributes for the attribute group */
@@ -163,6 +172,7 @@ static struct attribute *page_coherence_attrs[] = {
     &fault_write_count_attr.attr,
     &replica_found_count_attr.attr,
     &replica_created_count_attr.attr,
+    &total_handling_time_attr.attr,
     &reset_counters_attr.attr,
     NULL,
 };
@@ -1175,6 +1185,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return 0;
     }
 
+    /* 
+     * For statistics
+     */
     /* Increment fault counters */
     atomic64_inc(&page_coherence_fault_count);
     if (write) {
@@ -1182,6 +1195,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     } else {
         atomic64_inc(&page_coherence_fault_read_count);
     }
+    /* start timestamp */
+    ktime_t start, end, diff;
+    start = ktime_get();
 
     /* Check Metadata & get fault handle */
     fh = __start_local_fault_handling(original_pfn, write);
@@ -1261,6 +1277,10 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, original_pfn.val, pfn_t_to_pfn(*pfn));
+    /* end timestamp and update total handling time */
+    end = ktime_get();
+    diff = ktime_sub(end, start);
+    atomic64_add(ktime_to_ns(diff), &page_coherence_total_handling_time_ns);
     return 0;
 }
 

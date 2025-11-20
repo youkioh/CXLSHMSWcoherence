@@ -132,6 +132,7 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_fault_write_count, 0);
         atomic64_set(&page_coherence_replica_found_count, 0);
         atomic64_set(&page_coherence_replica_created_count, 0);
+        atomic64_set(&page_coherence_total_handling_time_ns, 0);
         pr_info("[Info]%s: All fault counters reset\n", __func__);
     }
     

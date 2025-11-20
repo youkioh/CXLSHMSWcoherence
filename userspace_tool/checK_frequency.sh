@@ -1,5 +1,5 @@
 #!/bin/bash
-MESUREMENT_TIME=60  # in seconds
+MESUREMENT_TIME=360  # in seconds
 
 
 # start time

@@ -16,7 +16,6 @@
 #include <linux/delay.h>
 #include <linux/refcount.h>
 #include <swmc/page_coherence.h>
-#include <swmc/page_replication_info.h>
 #include <linux/mmdebug.h>
 #include <linux/pagewalk.h>
 #include <linux/dax.h>
@@ -879,7 +878,11 @@ int create_page_replica(struct page *page_original, unsigned int order)
     }
 
     /* Step 1: Allocate page replica with retry and manual shrinking */
+#ifdef CONFIG_DE_STIJL
     page_replica = allocate_page_replica_no_retry(order);
+#else
+    page_replica = allocate_page_replica_with_retry(order);
+#endif
     if (!page_replica) {
         // pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
         err = -ENOMEM;

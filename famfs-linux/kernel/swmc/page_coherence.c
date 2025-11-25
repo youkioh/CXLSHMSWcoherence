@@ -31,7 +31,6 @@
 #include <linux/delay.h>
 #include <linux/page-flags.h>
 #include <swmc/page_coherence.h>
-#include <swmc/page_replication_info.h>
 #include <swmc/swmc_kmsg.h>
 #include "wait_station.h"
 #include <linux/syscalls.h>
@@ -350,6 +349,7 @@ enum {
     FH_ACTION_RESPOND = 0x100,
 };
 
+#ifdef CONFIG_DE_STIJL
 static const unsigned long fh_action_table[32] = {
 
     /*
@@ -361,15 +361,15 @@ static const unsigned long fh_action_table[32] = {
      */
     
     /* Local Fault */
-
-    /* - - - - */ FH_ACTION_ISSUE_ASYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
-    /* - - - S */ FH_ACTION_MAP_VPN_TO_PFN,
-    /* - - M - */ FH_ACTION_MAP_VPN_TO_PFN,
-    /* - - M S */ FH_ACTION_MAP_VPN_TO_PFN,
-    /* - W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    
+    /* - - - - */ FH_ACTION_ISSUE_ASYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
+    /* - - - S */ NULL,
+    /* - - M - */ NULL,
+    /* - - M S */ NULL,
+    /* - W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* - W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
-    /* - W M - */ FH_ACTION_MAP_VPN_TO_PFN,
-    /* - W M S */ FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION | FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* - W M - */ NULL,
+    /* - W M S */ FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION | FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* R - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
     /* R - - S */ FH_ACTION_MAP_VPN_TO_PFN,
     /* R - M - */ FH_ACTION_MAP_VPN_TO_PFN,
@@ -392,12 +392,62 @@ static const unsigned long fh_action_table[32] = {
     /* R - - - */ FH_ACTION_RESPOND,
     /* R - - S */ FH_ACTION_RESPOND,
     /* R - M - */ FH_ACTION_RESPOND | FH_ACTION_WRITEBACK | FH_ACTION_UPDATE_METADATA,
-    /* R - M S */ FH_ACTION_RESPOND,
+    /* R - M S */ FH_ACTION_INVALID,
     /* R W - - */ FH_ACTION_RESPOND,
     /* R W - S */ FH_ACTION_RESPOND | FH_ACTION_INVALIDATE | FH_ACTION_UPDATE_METADATA,
     /* R W M - */ FH_ACTION_RESPOND | FH_ACTION_INVALIDATE | FH_ACTION_WRITEBACK | FH_ACTION_UPDATE_METADATA,
     /* R W M S */ FH_ACTION_INVALID,
 };
+#else
+static const unsigned long fh_action_table[32] = {
+
+    /*
+     * R = replicated
+     * W = Write fault
+     * M = Modified
+     * S = Shared
+     * M S means stale Shared
+     */
+    
+    /* Local Fault */
+    
+    /* - - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* - - - S */ FH_ACTION_INVALID,
+    /* - - M - */ FH_ACTION_INVALID,
+    /* - - M S */ FH_ACTION_INVALID,
+    /* - W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* - W - S */ FH_ACTION_INVALID,
+    /* - W M - */ FH_ACTION_INVALID,
+    /* - W M S */ FH_ACTION_INVALID,
+    /* R - - - */ FH_ACTION_INVALID,
+    /* R - - S */ FH_ACTION_MAP_VPN_TO_PFN,
+    /* R - M - */ FH_ACTION_MAP_VPN_TO_PFN,
+    /* R - M S */ FH_ACTION_INVALID,
+    /* R W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
+    /* R W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN,
+    /* R W M - */ FH_ACTION_MAP_VPN_TO_PFN,
+    /* R W M S */ FH_ACTION_INVALID,
+
+    /* Remote Fault */
+
+    /* - - - - */ FH_ACTION_RESPOND,
+    /* - - - S */ FH_ACTION_INVALID,
+    /* - - M - */ FH_ACTION_INVALID,
+    /* - - M S */ FH_ACTION_INVALID,
+    /* - W - - */ FH_ACTION_RESPOND,
+    /* - W - S */ FH_ACTION_INVALID,
+    /* - W M - */ FH_ACTION_INVALID,
+    /* - W M S */ FH_ACTION_INVALID,
+    /* R - - - */ FH_ACTION_INVALID,
+    /* R - - S */ FH_ACTION_RESPOND,
+    /* R - M - */ FH_ACTION_RESPOND | FH_ACTION_WRITEBACK | FH_ACTION_UPDATE_METADATA,
+    /* R - M S */ FH_ACTION_INVALID,
+    /* R W - - */ FH_ACTION_RESPOND,
+    /* R W - S */ FH_ACTION_RESPOND | FH_ACTION_INVALIDATE | FH_ACTION_UPDATE_METADATA,
+    /* R W M - */ FH_ACTION_RESPOND | FH_ACTION_INVALIDATE | FH_ACTION_WRITEBACK | FH_ACTION_UPDATE_METADATA,
+    /* R W M S */ FH_ACTION_INVALID,
+};
+#endif
 
 static void set_fh_action(struct fault_handle *fh) {
     unsigned long fh_action;
@@ -790,15 +840,6 @@ static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr
         return ret;
     }
 
-    /* Manage page replica if needed */
-    if (is_REPLICATED(fh) && !is_SHARED(fh)) {
-        ret = fetch_page_replica(fh->original_page);
-        if (ret) {
-            pr_err("[Err]%s: Failed to fetch page replica for pfn=0x%lx, error %d\n", __func__, fh->original_pfn_val, ret);
-            return ret;
-        }
-    }
-
     return 0;
 }
 
@@ -966,23 +1007,24 @@ static void writeback_page(struct fault_handle *fh)
 
 static void invalidate_page(struct fault_handle *fh)
 {
-    unsigned long pfn_to_clean;
     struct address_space *mapping;
     unsigned long index;
     struct page *page_replica = NULL;
     if (is_REPLICATED(fh)) {
         page_replica = get_replica_opt(fh->original_page);
-        pfn_to_clean = page_to_pfn(page_replica);
         index = page_replica->index;
         mapping = page_replica->mapping;
     } else {
-        pfn_to_clean = fh->original_pfn_val;
         index = fh->original_page->index;
         mapping = fh->original_page->mapping;
     }
 
     // TODO: 여기 앞뒤로 dax folio에 대한 lock 없어도 제대로 동작하는지 확인 필요함.
+#ifdef CONFIG_DE_STIJL
     unmap_mapping_pages(mapping, index, 1, false);
+#else
+    flush_page_replica(page_replica);
+#endif
 }
 
 // Fetch/Invalidate message handling
@@ -1209,13 +1251,14 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         msleep(1);
         return VM_FAULT_RETRY;
     }
-    SetPageCoherence(fh->original_page);
 
     if (fh->fh_action == FH_ACTION_INVALID) {
         pr_err("[Err]%s: Invalid fault action for local fault\n", __func__);
         __finish_local_fault_handling(fh);
         return -EINVAL;
     }
+
+    SetPageCoherence(fh->original_page);
 
     if (fh->fh_action & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
         pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
@@ -1248,7 +1291,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
         pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+#ifdef CONFIG_DE_STIJL
         ret = fetch_page_replica(fh->original_page);
+#else
+        ret = create_page_replica(fh->original_page, 0);
+#endif
         if (ret) {
             pr_err("[Err]%s: Failed to fetch page replica for pfn=0x%lx, error %d\n", __func__, fh->original_pfn_val, ret);
             __finish_local_fault_handling(fh);
@@ -1264,7 +1311,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
-    if (is_REPLICATED(fh)) {
+    if (fh->fh_action & FH_ACTION_MAP_VPN_TO_PFN) {
         pr_info("[Info]%s: Mapping VPN to replica PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         map_vpn_to_pfn(fh, pfn);
     }

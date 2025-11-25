@@ -9,3 +9,11 @@ config PAGE_COHERENCE
 	  multiple CXL nodes to maintain memory coherence.
 
 	  If unsure, say N.
+
+config DE_STIJL
+	bool "De Stijl implmentation for selective replcation and asynchronous transaction handling"
+	depends on X86_64
+	help
+		Enable De Stijl for CXL shared memory environments.
+		
+		If unsure, say N.

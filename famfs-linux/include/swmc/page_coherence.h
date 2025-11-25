@@ -72,6 +72,8 @@ void print_page_info(struct page *page, const char *context);
 // int destroy_page_replica(struct page *page_replica);
 int writeback_page_replica(struct page *page_replica);
 int fetch_page_replica(struct page *original);
+int create_page_replica(struct page *page_original, unsigned int order);
+int fluch_page_replica(struct page *page_replica);
 // struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order);
 // void put_page_replica_ref(struct page *page_replica);
 // int make_page_replica_invalid(struct page *page_replica);

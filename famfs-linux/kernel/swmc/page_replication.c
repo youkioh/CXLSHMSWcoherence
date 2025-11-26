@@ -820,7 +820,7 @@ retry_alloc:
                 __func__, retry_count);
     }
 
-    // print_page_info(page_replica, "Allocated page replica");
+    print_page_info(page_replica, "Allocated page replica");
     // print_page_info(page_replica + 1, "Allocated page replica + 1");
     // print_page_info(page_replica + 2, "Allocated page replica + 2");
     track_page_alloc(order);
@@ -845,8 +845,8 @@ int create_page_replica(struct page *page_original, unsigned int order)
         return -ENOMEM;
     }
 
-    // pr_info("[Info]%s: Creating page replica for original page %p (order=%u)\n",
-    //         __func__, page_original, order);
+    pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
+            page_to_pfn(page_original), order);
 
     if (!PageCoherence(page_original)) {
         // pr_info("[%s] Original page %p is not marked for coherence\n", __func__, page_original);

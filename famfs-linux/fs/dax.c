@@ -915,7 +915,7 @@ static void *dax_insert_entry(struct xa_state *xas, struct vm_fault *vmf,
 		const struct iomap_iter *iter, void *entry, pfn_t pfn,
 		unsigned long flags)
 {
-	struct folio* folio = pfn_folio(pfn_t_to_pfn(pfn));
+	// struct folio* folio = pfn_folio(pfn_t_to_pfn(pfn));
 	// pr_info("[%s] before dax_make_entry of pfn: %lu, nr_pages_mapped=%u\n",
 	// 	__func__, pfn_t_to_pfn(pfn), folio_nr_pages_mapped(folio));
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;

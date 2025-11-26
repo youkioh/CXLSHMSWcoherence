@@ -1221,9 +1221,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     if (page_coherence_enabled == 0) {
         // pr_info("[Info]%s: Page coherence handling is disabled, skipping\n", __func__);
         // pr_info("[Info]%s: Page coherence handling is disabled, check every accessed paged in CXL shared memory to Shared State without coherence transaction issuing\n", __func__);
+#ifdef CONFIG_DE_STIJL
         SetPageCoherence(pfn_to_page(pfn_t_to_pfn(original_pfn)));
         SetPageShared(pfn_to_page(pfn_t_to_pfn(original_pfn)));
         ClearPageModified(pfn_to_page(pfn_t_to_pfn(original_pfn)));
+#endif
         return 0;
     }
 

@@ -338,6 +338,7 @@ int flush_page_replica(struct page *page_replica);
  * - Referenced pages get moved back to active list MRU
  * - Non-referenced pages get unmapped and freed
  */
+// TODO: Add logic to utilize locked flag in page replica to handle page invalidation during reclaim
 static unsigned long replica_reclaim_from_inactive(unsigned long nr)
 {
     unsigned long flags;
@@ -1060,7 +1061,7 @@ int flush_page_replica(struct page *page_replica)
     struct page *page_original = get_original_opt(page_replica);
 
     if (!page_original) {
-        // pr_info("[Info]%s: Not replicated page.\n", __func__);
+        pr_info("[Info]%s: Not replicated page.\n", __func__);
         return -EACCES;
     }
 
@@ -1068,28 +1069,28 @@ int flush_page_replica(struct page *page_replica)
     // pr_info("[Info]%s: page_original=0x%lx, page_coherence=%d\n",
     //         __func__, page_to_pfn(page_original), page_coherence);
     if (!PageCoherence(page_original)) {
-        // pr_info("[Info]%s: Original page %p is not marked for coherence, skipping flush.\n",
-        //         __func__, page_original);
+        pr_info("[Info]%s: Original pfn 0x%lx is not marked for coherence, skipping flush.\n",
+                __func__, page_to_pfn(page_original));
         return -EINVAL;
     }
 
     // pr_err("[Err]%s: There should be NO page replica NOW!", __func__);
     // return -EINVAL;
     
-    if (PageLocked(page_replica) || PageLocked(page_original)) {
-        // pr_err("[%s] Original or replica page is locked. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
+    if (PageLocked(page_replica)) {
+        pr_err("[%s] Replica page is locked. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
         return -EBUSY;
     }
 
     // trylock_page(page_original);
     if (!trylock_page(page_original)) {
-        // pr_err("[%s] Original page %p is locked\n", __func__, page_original);
+        pr_err("[%s] Original page is locked. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
         unlock_page(page_original);
         return -EBUSY;
     }
 
     if (!PageLocked(page_original)) {
-        pr_err("[%s] Original page %p should be locked after trylock\n", __func__, page_original);
+        pr_err("[%s] Original page should be locked after trylock. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
         unlock_page(page_original);
         return -EINVAL;
     }
@@ -1146,6 +1147,80 @@ int flush_page_replica(struct page *page_replica)
 
     return 0;
 }
+
+#ifndef CONFIG_DE_STIJL
+int flush_page_replica_locked(struct page *page_replica)
+{
+    int order = 0;
+    int err;
+
+    
+    struct page *page_original = get_original_opt(page_replica);
+
+    if (!page_original) {
+        pr_info("[Info]%s: Not replicated page.\n", __func__);
+        return -EACCES;
+    }
+
+    // int page_coherence = PageCoherence(page_original);
+    // pr_info("[Info]%s: page_original=0x%lx, page_coherence=%d\n",
+    //         __func__, page_to_pfn(page_original), page_coherence);
+    // TODO: Wrap this with CONFIG_SANITY_CHECK
+    if (!PageCoherence(page_original)) {
+        pr_info("[Info]%s: Original pfn 0x%lx is not marked for coherence, skipping flush.\n",
+                __func__, page_to_pfn(page_original));
+        return -EINVAL;
+    }
+    // TODO: Wrap this with CONFIG_SANITY_CHECK
+    if (!PageLocked(page_original)) {
+        pr_err("[%s] Original page should be locked before calling this function. original pfn=0x%lx\n", __func__, page_to_pfn(page_original));
+        return -EINVAL;
+    }
+
+    /* Step 1-2: Writeback page replica */
+    err = writeback_page_replica(page_replica);
+    if (err) {
+        pr_err("[Err]%s: Failed to writeback replica page %p: %d\n",
+                __func__, page_replica, err);
+        return err;
+    }
+
+    /* Step 3: Set struct page information */
+    page_original->private = page_replica->private & ~SWMC_TAG_MASK; // copy private data except tag bits
+    page_original->private = page_original->private | SWMC_TAG_ACCESS;
+    page_original->mapping = page_replica->mapping;
+    page_original->index = page_replica->index;
+
+    page_replica->private = 0; // clear private data
+    page_replica->memcg_data = NULL;
+
+    /* step 4: Remove replica page to LRU*/
+    remove_replica_lru(page_replica);
+
+    /* Step 5: Clear flags */
+    ClearPageCoherence(page_replica);
+    ClearPageReplicated(page_replica);
+    ClearPageReplicated(page_original);
+
+    /* Step 6: Unmap page replica */
+    struct address_space *mapping = page_original->mapping;
+    pgoff_t index = page_original->index;
+    if (mapping)
+        unmap_mapping_pages(mapping, index, 1 << order, false);
+
+    page_replica->mapping = NULL;
+    page_replica->index = 0;
+    
+    __free_pages(page_replica, order);
+    track_page_free(order);
+
+    // pr_info("[Info]%s: Successfully wrote back replica page %p to original pfn 0x%lx\n",
+    //         __func__, page_replica, page_to_pfn(page_original));
+
+
+    return 0;
+}
+#endif /* No CONFIG_DE_STIJL */
 
 /* ========================================================================
  * Page Replication Daemon

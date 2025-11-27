@@ -455,7 +455,7 @@ static void set_fh_action(struct fault_handle *fh) {
 
     index = fh->fh_flags & 0x1F; // Get lower 5 bits for index
 
-    // pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
+    pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
 
     fh_action = fh_action_table[index];
 
@@ -1023,7 +1023,10 @@ static void invalidate_page(struct fault_handle *fh)
 #ifdef CONFIG_DE_STIJL
     unmap_mapping_pages(mapping, index, 1, false);
 #else
-    flush_page_replica(page_replica);
+    int ret = flush_page_replica_locked(page_replica);
+    if (ret) {
+        pr_err("[Error]%s: Failed to flush page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    }
 #endif
 }
 
@@ -1259,6 +1262,8 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         __finish_local_fault_handling(fh);
         return -EINVAL;
     }
+
+    print_page_info(fh->original_page, "__page_coherence_fault: after __start_local_fault_handling");
 
     SetPageCoherence(fh->original_page);
 

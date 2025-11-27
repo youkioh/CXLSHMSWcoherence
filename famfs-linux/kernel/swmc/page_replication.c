@@ -641,21 +641,17 @@ struct page *get_replica_opt(struct page *orig)
     struct page *replica;
     unsigned long pfn;
 
-    if (!PageReplicated(orig)) {
+    
+    // print_page_info(orig, "original_page in get_replica");
+    // pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
+    //         __func__, orig, v);
+    
+    if (!PageReplicated(orig) || !v) {
         // pr_info("[Info]%s: original_page is not replicated (PageReplicated==0)\n", __func__);
         return NULL;
     }
 
-    // print_page_info(orig, "original_page in get_replica");
-    // pr_info("[Info]%s: original_page=%px, private(raw)=0x%lx\n",
-    //         __func__, orig, v);
-
-    if (!v) {
-        // pr_info("[Info]%s: not replicated (private==0)\n", __func__);
-        return NULL;
-    }
-
-    // TODO: Delete this method if PageReplicated is reliable enough
+    // TODO: Change this method if PageReplicated is reliable enough
     switch (v & SWMC_TAG_MASK) {
     case SWMC_TAG_PTR:
         // pr_info("[Info]%s: tag=PTR\n", __func__);
@@ -826,9 +822,9 @@ retry_alloc:
     track_page_alloc(order);
     return page_replica;
 }
-
+#ifdef CONFIG_DE_STIJL
 /**
- * create_page_replica - Create a new page replica
+ * create_page_replica - Create a new page replica. for De Stijl
  *
  * Returns: 0 on success, negative errno on failure.
  */
@@ -877,12 +873,9 @@ int create_page_replica(struct page *page_original, unsigned int order)
         goto unlock_page;
     }
 
-    /* Step 1: Allocate page replica with retry and manual shrinking */
-#ifdef CONFIG_DE_STIJL
+    /* Step 1: Allocate page replica with no retry */
     page_replica = allocate_page_replica_no_retry(order);
-#else
-    page_replica = allocate_page_replica_with_retry(order);
-#endif
+
     if (!page_replica) {
         // pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
         err = -ENOMEM;
@@ -926,6 +919,7 @@ unlock_page:
     unlock_page(page_original);
     if(PageLocked(page_original)) {
         pr_err("[%s] Original page %p is still locked!\n", __func__, page_original);
+        err = -EINVAL;
     }
     return err;
 
@@ -938,6 +932,98 @@ free_pages:
     track_page_free(order);
     return err;
 }
+#else
+/**
+ * create_page_replica - for popcorn
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+int create_page_replica(struct page *page_original, unsigned int order)
+{
+    struct page *page_replica;
+    int err = 0;
+    size_t size = PAGE_SIZE << order; // Calculate size based on order
+
+    long avail_pages = si_mem_available();
+    long threshold_pages =  (2UL << 30) >> PAGE_SHIFT; // 2GB threshold
+
+    if (avail_pages < threshold_pages) {
+        return -ENOMEM;
+    }
+
+    pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
+            page_to_pfn(page_original), order);
+
+    if (!PageCoherence(page_original)) {
+        // pr_info("[%s] Original page %p is not marked for coherence\n", __func__, page_original);
+        return -EPERM;
+    }
+#ifdef CONFIG_SANITY_CHECK
+    if (!PageLocked(page_original)) {
+        pr_err("[%s] Original page %p should be locked.\n", __func__, page_original);
+        err = -EINVAL;
+        goto out;
+    }
+
+    if (PageModified(page_original) && PageShared(page_original)) {
+        pr_info("[Info]%s: Original pfn 0x%lx is stale shared page, skip replication\n",
+                __func__, page_to_pfn(page_original));
+        err = -EPERM;
+        goto out;
+    }
+
+    if (get_replica_opt(page_original)) {
+        // pr_err("[%s] Page 0x%lx already has a replica\n", __func__, page_original);
+        err = -EACCES;
+        goto out;
+    }
+#endif /* CONFIG_SANITY_CHECK */
+
+    /* Step 1: Allocate page replica with retry and manual shrinking */
+    page_replica = allocate_page_replica_with_retry(order);
+    if (!page_replica) {
+        // pr_err("[%s] Failed to allocate replica page (order=%u)\n", __func__, order);
+        err = -ENOMEM;
+        goto out;
+    }
+
+    /* Step 2: Copy data from original to replica */
+    err = copy_data_page(page_original, page_replica, order);
+    if (err) {
+        pr_err("[%s] Data copy failed: %d\n", __func__, err);
+        goto free_pages;
+    }
+
+    struct address_space *mapping = page_original->mapping;
+    pgoff_t index = page_original->index;
+
+    /* step 3: Add replica page to LRU*/
+    insert_replica_lru(page_replica);
+
+    /* Step 4: Set struct page infomation */
+    SetPageCoherence(page_replica);
+    SetPageReplicated(page_replica);
+    SetPageReplicated(page_original);
+    page_replica->memcg_data = page_original;
+    page_original->private = page_replica;
+
+    page_replica->mapping = mapping;
+    page_replica->index = index;
+    page_replica->private = page_original->private & ~SWMC_TAG_MASK; // copy private data except tag bits
+    page_replica->private = page_replica->private | SWMC_TAG_REPLICA_SELF | SWMC_TAG_ACCESS;
+
+    // pr_info("[Info]%s: Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
+    //         __func__, order, page_to_pfn(page_replica), page_to_pfn(page_original));
+    
+out:
+    return err;
+
+free_pages:
+    __free_pages(page_replica, order);
+    track_page_free(order);
+    return err;
+}
+#endif /* CONFIG_DE_STIJL */
 
 /* Writeback page replica data to original page
  * This is used in page_coherence.c too.
@@ -1053,7 +1139,6 @@ int flush_page_replica(struct page *page_replica)
     
     __free_pages(page_replica, order);
     track_page_free(order);
-    
 
     // pr_info("[Info]%s: Successfully wrote back replica page %p to original pfn 0x%lx\n",
     //         __func__, page_replica, page_to_pfn(page_original));

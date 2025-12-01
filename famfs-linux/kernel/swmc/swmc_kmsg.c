@@ -14,6 +14,7 @@
 #include <linux/err.h>
 #include <swmc/swmc_kmsg.h>
 #include <linux/kthread.h>
+#include <linux/workqueue.h>
 
 static swmc_kmsg_cbftn swmc_kmsg_cbftns[SWMC_KMSG_TYPE_MAX] = {NULL};
 
@@ -36,43 +37,74 @@ int swmc_kmsg_unregister_callback(enum swmc_kmsg_type type)
 }
 EXPORT_SYMBOL(swmc_kmsg_unregister_callback);
 
-// TODO: change logic to not generating a kthread for each message
+struct swmc_work_item {
+    struct work_struct work;        // 커널 워크큐 관리용 구조체
+    struct swmc_kmsg_message msg;   // 실제 처리할 메시지 데이터 (복사본)
+};
+
+/* 전역 워크큐 포인터 */
+static struct workqueue_struct *swmc_fetch_inv_wq;
+static struct workqueue_struct *swmc_ack_wq;
+
+/* 2. Worker 함수 (Consumer) */
+// 워커 스레드가 큐에서 작업을 하나 꺼냈을 때 실행되는 함수입니다.
+static void swmc_work_handler(struct work_struct *work)
+{
+    // work_struct 포인터를 감싸고 있는 swmc_work_item 포인터를 얻어옵니다.
+    struct swmc_work_item *item = container_of(work, struct swmc_work_item, work);
+    swmc_kmsg_cbftn callback;
+    
+    // 콜백 함수 가져오기
+    callback = swmc_kmsg_cbftns[item->msg.header.type];
+
+    if (callback) {
+        // 실제 콜백 실행
+        callback(&item->msg);
+    } else {
+        pr_err("swmc_kmsg: No callback for type %d\n", item->msg.header.type);
+    }
+
+    // [중요] 동적으로 할당했던 작업 아이템 메모리 해제
+    kfree(item);
+}
+
 int swmc_kmsg_process_message(struct swmc_kmsg_message *message)
 {
-    swmc_kmsg_cbftn callback;
+    struct swmc_work_item *item;
 
-    /* Validate message pointer */
-    if (!message) {
-        pr_err("swmc_kmsg: NULL message pointer\n");
+    if (!message) return -EINVAL;
+    if (message->header.type < 0 || message->header.type >= SWMC_KMSG_TYPE_MAX)
+        return -EINVAL;
+
+    // 콜백이 있는지 먼저 확인
+    if (!swmc_kmsg_cbftns[message->header.type]) {
+        pr_err("swmc_kmsg: No callback registered for type %d\n", message->header.type);
         return -EINVAL;
     }
 
-    /* Validate message type range */
-    if (message->header.type < 0 || message->header.type >= SWMC_KMSG_TYPE_MAX) {
-        pr_err("swmc_kmsg: Invalid message type %d (max: %d)\n", 
-               message->header.type, SWMC_KMSG_TYPE_MAX - 1);
-        return -EINVAL;
+    item = kmalloc(sizeof(struct swmc_work_item), GFP_ATOMIC);
+    if (!item) {
+        pr_err("swmc_kmsg: Failed to allocate work item\n");
+        return -ENOMEM;
     }
 
-    callback = swmc_kmsg_cbftns[message->header.type];
+    // 데이터 복사
+    memcpy(&item->msg, message, sizeof(struct swmc_kmsg_message));
 
-    if (callback != NULL) {
-        // make kthread to process the message
-        struct task_struct *tsk;
-        tsk =  kthread_run((int (*)(void *))callback, message, "swmc_kmsg_msg_processer");
-        
-        if (IS_ERR(tsk))
-            return PTR_ERR(tsk);
+        // Work 구조체 초기화 (이 작업이 실행될 때 swmc_work_handler가 호출됨)
+    INIT_WORK(&item->work, swmc_work_handler);
 
-        return 0;
-        
-        // return callback(message);
+    // 큐에 작업 등록 (즉시 리턴됨)
+    // 성공 시 true, 이미 큐에 있으면 false 반환
+    if (message->header.type == SWMC_KMSG_TYPE_FETCH ||
+        message->header.type == SWMC_KMSG_TYPE_INVALIDATE) {
+        queue_work(swmc_fetch_inv_wq, &item->work);
     } else {
-        pr_err("No callback registered for message type %d\n", message->header.type);
-        return -1; // Indicate error if no callback is registered, can be changed later
+        queue_work(swmc_ack_wq, &item->work);
     }
+
+    return 0;
 }
-EXPORT_SYMBOL(swmc_kmsg_process_message);
 
 /* =============================================================================
  * MESSAGING OPERATIONS REGISTRATION
@@ -182,3 +214,13 @@ int swmc_kmsg_node_count(void)
 }
 EXPORT_SYMBOL(swmc_kmsg_node_count);
 
+static int __init swmc_kmsg_init(void)
+{
+    swmc_fetch_inv_wq = alloc_ordered_workqueue("swmc_kmsg_fetch_inv_worker", 0);
+    swmc_ack_wq = alloc_ordered_workqueue("swmc_kmsg_ack_worker", 0);
+    if (!swmc_fetch_inv_wq || !swmc_ack_wq)
+        return -ENOMEM;
+    return 0;
+}
+
+subsys_initcall(swmc_kmsg_init);

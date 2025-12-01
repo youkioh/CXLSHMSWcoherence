@@ -455,7 +455,7 @@ static void set_fh_action(struct fault_handle *fh) {
 
     index = fh->fh_flags & 0x1F; // Get lower 5 bits for index
 
-    pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
+    // pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
 
     fh_action = fh_action_table[index];
 
@@ -1228,9 +1228,42 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         SetPageCoherence(pfn_to_page(pfn_t_to_pfn(original_pfn)));
         SetPageShared(pfn_to_page(pfn_t_to_pfn(original_pfn)));
         ClearPageModified(pfn_to_page(pfn_t_to_pfn(original_pfn)));
+#else
+        /* Check Metadata & get fault handle */
+        fh = __start_local_fault_handling(original_pfn, write);
+        SetPageCoherence(fh->original_page);
+        if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
+            // pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+            ret = create_page_replica(fh->original_page, 0);
+            if (ret) {
+                pr_err("[Err]%s: Failed to fetch page replica for pfn=0x%lx, error %d\n", __func__, fh->original_pfn_val, ret);
+                __finish_local_fault_handling(fh);
+                return ret;
+            }
+        }
+        /* Update metadata */
+        if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
+            // pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+            update_metadata(fh);
+        }
+        
+        // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        /* Map VPN to PFN */
+        if (fh->fh_action & FH_ACTION_MAP_VPN_TO_PFN) {
+            // pr_info("[Info]%s: Mapping VPN to replica PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+            map_vpn_to_pfn(fh, pfn);
+        }
+        
+        /* Finish local fault handling */
+        if (__finish_local_fault_handling(fh)) {
+            pr_info("[Info]%s: We should retry local fault handling\n", __func__);
+            msleep(1);
+            return VM_FAULT_RETRY;
+        }
 #endif
         return 0;
     }
+
 
     /* 
      * For statistics

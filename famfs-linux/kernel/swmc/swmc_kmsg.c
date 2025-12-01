@@ -36,6 +36,7 @@ int swmc_kmsg_unregister_callback(enum swmc_kmsg_type type)
 }
 EXPORT_SYMBOL(swmc_kmsg_unregister_callback);
 
+// TODO: change logic to not generating a kthread for each message
 int swmc_kmsg_process_message(struct swmc_kmsg_message *message)
 {
     swmc_kmsg_cbftn callback;

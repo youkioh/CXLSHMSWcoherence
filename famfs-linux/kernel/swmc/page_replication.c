@@ -595,6 +595,8 @@ static int __init replica_shrinker_init(void)
     return 0;
 }
 
+subsys_initcall(replica_shrinker_init);
+
 SYSCALL_DEFINE0(flush_replicas)
 {
     pr_info("[syscall] flush_replicas called\n");
@@ -817,7 +819,7 @@ retry_alloc:
                 __func__, retry_count);
     }
 
-    print_page_info(page_replica, "Allocated page replica");
+    // print_page_info(page_replica, "Allocated page replica");
     // print_page_info(page_replica + 1, "Allocated page replica + 1");
     // print_page_info(page_replica + 2, "Allocated page replica + 2");
     track_page_alloc(order);
@@ -945,15 +947,8 @@ int create_page_replica(struct page *page_original, unsigned int order)
     int err = 0;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
 
-    long avail_pages = si_mem_available();
-    long threshold_pages =  (2UL << 30) >> PAGE_SHIFT; // 2GB threshold
-
-    if (avail_pages < threshold_pages) {
-        return -ENOMEM;
-    }
-
-    pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
-            page_to_pfn(page_original), order);
+    // pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
+    //         page_to_pfn(page_original), order);
 
     if (!PageCoherence(page_original)) {
         // pr_info("[%s] Original page %p is not marked for coherence\n", __func__, page_original);

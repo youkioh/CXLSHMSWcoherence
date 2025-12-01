@@ -198,6 +198,10 @@ static unsigned long insurance_recv = 0, insurance_send = 0;
  */
 static inline unsigned long win_inuse(struct cxl_kmsg_window *win) 
 {
+    // invalidate cache to get latest head/tail values. just flush head and tail of window struct
+    cxl_invalidate_cache(&win->head, sizeof(win->head));
+    cxl_invalidate_cache(&win->tail, sizeof(win->tail));
+    
     return win->head - win->tail;
 }
 
@@ -250,14 +254,24 @@ static inline int win_get(struct cxl_kmsg_window *win,
     
     if (!win_inuse(win))
         return -1;
+
+    pr_info("%s: win_get: head=%lu, tail=%lu, inuse=%lu\n", 
+            MODULE_NAME, win->head, win->tail, win_inuse(win));
     
-    /* Invalidate cache to see latest data from other CXL nodes */
-    cxl_invalidate_cache(win, sizeof(struct cxl_kmsg_window));
+    // /* Invalidate cache to see latest data from other CXL nodes */
+    // cxl_invalidate_cache(win, sizeof(struct cxl_kmsg_window));
+
+    // pr_info("%s: After invalidate window: head=%lu, tail=%lu, inuse=%lu\n", 
+    //         MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     rcvd = (struct swmc_kmsg_message*)&win->buffer[win->tail % CXL_KMSG_RBUF_SIZE];
     
     /* Invalidate message buffer cache to get fresh data */
     cxl_invalidate_cache(rcvd, sizeof(struct swmc_kmsg_message));
+
+    pr_info("%s: After invalidate message: type=%d, ws_id=%d, from_nid=%d, to_nid=%d\n", 
+            MODULE_NAME, rcvd->header.type, rcvd->header.ws_id, 
+            rcvd->header.from_nid, rcvd->header.to_nid);
     
     /* Update ring buffer tail */
     insurance_recv = win->tail + 1;
@@ -266,6 +280,9 @@ static inline int win_get(struct cxl_kmsg_window *win,
     /* Make tail update visible to other nodes */
     cxl_flush_cache(&win->tail, sizeof(win->tail));
     smp_mb();
+
+    pr_info("%s: After updating tail: head=%lu, tail=%lu, inuse=%lu\n", 
+            MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     *msg = rcvd;
     return 0;

@@ -105,6 +105,7 @@ int swmc_kmsg_process_message(struct swmc_kmsg_message *message)
 
     return 0;
 }
+EXPORT_SYMBOL(swmc_kmsg_process_message);
 
 /* =============================================================================
  * MESSAGING OPERATIONS REGISTRATION

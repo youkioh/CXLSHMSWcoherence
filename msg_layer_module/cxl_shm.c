@@ -30,7 +30,7 @@
  * ============================================================================= */
 
 #define MODULE_NAME "shm_cxl"
-#define CXL_KMSG_RBUF_SIZE 128        /* Ring buffer size */
+#define CXL_KMSG_RBUF_SIZE 65536        /* Ring buffer size */
 
 /* Multi-node configuration */
 // #define MAX_NODES 4
@@ -169,6 +169,12 @@ struct cxl_kmsg_window {
     volatile struct swmc_kmsg_message buffer[CXL_KMSG_RBUF_SIZE];
 } __attribute__((packed));
 
+/* Calculate window offset based on actual structure size
+ * Round up to 4KB page boundary for better performance and alignment
+ */
+#define SWMC_KMSG_WINDOW_OFFSET \
+    (((sizeof(struct cxl_kmsg_window) + 0xFFF) >> 12) << 12)  /* Round up to 4KB */
+
 /* CXL kmsg handle structure */
 struct cxl_kmsg_handle {
     int nid;
@@ -192,6 +198,10 @@ static unsigned long insurance_recv = 0, insurance_send = 0;
  */
 static inline unsigned long win_inuse(struct cxl_kmsg_window *win) 
 {
+    // invalidate cache to get latest head/tail values. just flush head and tail of window struct
+    cxl_invalidate_cache(&win->head, sizeof(win->head));
+    cxl_invalidate_cache(&win->tail, sizeof(win->tail));
+    
     return win->head - win->tail;
 }
 
@@ -244,14 +254,24 @@ static inline int win_get(struct cxl_kmsg_window *win,
     
     if (!win_inuse(win))
         return -1;
+
+    pr_info("%s: win_get: head=%lu, tail=%lu, inuse=%lu\n", 
+            MODULE_NAME, win->head, win->tail, win_inuse(win));
     
-    /* Invalidate cache to see latest data from other CXL nodes */
-    cxl_invalidate_cache(win, sizeof(struct cxl_kmsg_window));
+    // /* Invalidate cache to see latest data from other CXL nodes */
+    // cxl_invalidate_cache(win, sizeof(struct cxl_kmsg_window));
+
+    // pr_info("%s: After invalidate window: head=%lu, tail=%lu, inuse=%lu\n", 
+    //         MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     rcvd = (struct swmc_kmsg_message*)&win->buffer[win->tail % CXL_KMSG_RBUF_SIZE];
     
     /* Invalidate message buffer cache to get fresh data */
     cxl_invalidate_cache(rcvd, sizeof(struct swmc_kmsg_message));
+
+    pr_info("%s: After invalidate message: type=%d, ws_id=%d, from_nid=%d, to_nid=%d\n", 
+            MODULE_NAME, rcvd->header.type, rcvd->header.ws_id, 
+            rcvd->header.from_nid, rcvd->header.to_nid);
     
     /* Update ring buffer tail */
     insurance_recv = win->tail + 1;
@@ -260,6 +280,9 @@ static inline int win_get(struct cxl_kmsg_window *win,
     /* Make tail update visible to other nodes */
     cxl_flush_cache(&win->tail, sizeof(win->tail));
     smp_mb();
+
+    pr_info("%s: After updating tail: head=%lu, tail=%lu, inuse=%lu\n", 
+            MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     *msg = rcvd;
     return 0;
@@ -464,12 +487,14 @@ static struct swmc_kmsg_ops cxl_shm_ops = {
 
 /**
  * cxl_kmsg_receive() - Receive and process messages from all nodes
+ * return 0 if there is no message, return 1 if one message is processed, return negative on error
  */
 static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
 {
     struct cxl_kmsg_window *win;
     struct swmc_kmsg_message *msg;
     int from_nid, ret;
+    bool found_message = false;
 
     /* Poll all RX windows for incoming messages */
     for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
@@ -482,30 +507,41 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
             /* Validate message before processing */
             if (!msg) {
                 pr_err("%s: Received NULL message from node %d\n", MODULE_NAME, from_nid);
-                continue;
+                ret = -EINVAL;
+                break;
             }
-            pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
-                    MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
-            
             /* Additional validation for message header */
             if (msg->header.type < 0 || msg->header.type >= SWMC_KMSG_TYPE_MAX) {
                 pr_err("%s: Invalid message type %d from node %d (hex: 0x%x)\n", 
-                       MODULE_NAME, msg->header.type, from_nid, msg->header.type);
-                continue;
+                        MODULE_NAME, msg->header.type, from_nid, msg->header.type);
+                ret = -EINVAL;
+                break;
             }
-            
+            if (msg->header.to_nid == msg->header.from_nid) {
+                pr_err("%s: Message from node %d has same from/to NID (%d)\n", 
+                        MODULE_NAME, from_nid, msg->header.from_nid);
+                ret = -EINVAL;
+                break;
+            }
+
+            pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
+                MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
+
+            found_message = true;
             ret = swmc_kmsg_process_message(msg);
             
             smp_mb();
             
             if (ret) {
                 pr_info(KERN_WARNING "%s: Failed to process message from node %d: %d\n", 
-                       MODULE_NAME, from_nid, ret);
+                        MODULE_NAME, from_nid, ret);
             }
         }
     }
-    
-    return 0;
+    if (ret < 0)
+        return ret;
+
+    return found_message;
 }
 
 /**
@@ -514,12 +550,19 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
 static int recv_handler(void *arg)
 {
     struct cxl_kmsg_handle *ckh = (struct cxl_kmsg_handle *)arg;
+    int ret;
 
-    pr_info(KERN_INFO "%s: Receive handler for node %d started\n", MODULE_NAME, ckh->nid);
+    pr_info("%s: Receive handler for node %d started\n", MODULE_NAME, ckh->nid);
 
     while (!kthread_should_stop()) {
-        msleep(1); /* Polling interval: 1ms */
         cxl_kmsg_receive(ckh);
+        if (ret == 0) {
+            cpu_relax();
+            cond_resched();
+            // usleep_range(50, 100); // TODO: use if needed
+        } else if (ret < 0) {
+            pr_err("%s: Error receiving messages: %d\n", MODULE_NAME, ret);
+        }
     }
     
     pr_info(KERN_INFO "%s: Receive handler for node %d stopped\n", MODULE_NAME, ckh->nid);
@@ -542,6 +585,11 @@ static int __init init_cxl_shm(void)
     
     pr_info(KERN_INFO "%s: Loading CXL Shared Memory messaging layer...\n", MODULE_NAME);
     pr_info(KERN_INFO "%s: Using DAX device: %s, Node ID: %d\n", MODULE_NAME, dax_name, node_id);
+    pr_info(KERN_INFO "%s: Ring buffer size: %d messages\n", MODULE_NAME, CXL_KMSG_RBUF_SIZE);
+    pr_info(KERN_INFO "%s: Window structure size: %lu bytes (0x%lx)\n", 
+            MODULE_NAME, sizeof(struct cxl_kmsg_window), sizeof(struct cxl_kmsg_window));
+    pr_info(KERN_INFO "%s: Window offset (aligned): %d bytes (0x%x)\n", 
+            MODULE_NAME, SWMC_KMSG_WINDOW_OFFSET, SWMC_KMSG_WINDOW_OFFSET);
     
     if (node_id < 0 || node_id >= MAX_NODES) {
         pr_info(KERN_ERR "%s: Invalid node_id %d (must be 0-%d)\n", MODULE_NAME, node_id, MAX_NODES-1);
@@ -613,6 +661,8 @@ static int __init init_cxl_shm(void)
 
         cxl_kmsg_handler->win_rx[i] = shm_window;
         /* Note: Don't initialize RX windows - they're initialized by the sender */
+        /* No! intialize this! */
+        cxl_kmsg_window_init(shm_window);
     }
     
     /* Register messaging operations with page coherence subsystem */

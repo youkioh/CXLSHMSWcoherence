@@ -4,6 +4,8 @@
 #include <linux/completion.h>
 #include <linux/atomic.h>
 
+#define MAX_WAIT_STATIONS 65536
+
 struct wait_station {
 	int id; // wait station ID
 	pid_t pid;

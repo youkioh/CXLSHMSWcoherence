@@ -100,7 +100,10 @@ static atomic64_t page_coherence_fault_read_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_total_handling_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_page_fault_handling_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_coherence_transaction_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_page_replication_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_metadata_update_time_ns = ATOMIC64_INIT(0);
 
 /* Sysfs show functions for fault statistics */
 static ssize_t fault_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
@@ -128,9 +131,24 @@ static ssize_t replica_created_count_show(struct kobject *kobj, struct kobj_attr
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_replica_created_count));
 }
 
-static ssize_t total_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t total_page_fault_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_handling_time_ns));
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_page_fault_handling_time_ns));
+}
+
+static ssize_t total_coherence_transaction_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_coherence_transaction_time_ns));
+}
+
+static ssize_t total_page_replication_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_page_replication_time_ns));
+}
+
+static ssize_t total_metadata_update_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_metadata_update_time_ns));
 }
 
 /* Sysfs store function for resetting counters */
@@ -148,7 +166,10 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_fault_write_count, 0);
         atomic64_set(&page_coherence_replica_found_count, 0);
         atomic64_set(&page_coherence_replica_created_count, 0);
-        atomic64_set(&page_coherence_total_handling_time_ns, 0);
+        atomic64_set(&page_coherence_total_page_fault_handling_time_ns, 0);
+        atomic64_set(&page_coherence_total_coherence_transaction_time_ns, 0);
+        atomic64_set(&page_coherence_total_page_replication_time_ns, 0);
+        atomic64_set(&page_coherence_total_metadata_update_time_ns, 0);
         pr_info("[Info]%s: All fault counters reset\n", __func__);
     }
     
@@ -161,7 +182,10 @@ static struct kobj_attribute fault_read_count_attr = __ATTR_RO(fault_read_count)
 static struct kobj_attribute fault_write_count_attr = __ATTR_RO(fault_write_count);
 static struct kobj_attribute replica_found_count_attr = __ATTR_RO(replica_found_count);
 static struct kobj_attribute replica_created_count_attr = __ATTR_RO(replica_created_count);
-static struct kobj_attribute total_handling_time_attr = __ATTR_RO(total_handling_time);
+static struct kobj_attribute total_page_fault_handling_time_attr = __ATTR_RO(total_page_fault_handling_time);
+static struct kobj_attribute total_coherence_transaction_time_attr = __ATTR_RO(total_coherence_transaction_time);
+static struct kobj_attribute total_page_replication_time_attr = __ATTR_RO(total_page_replication_time);
+static struct kobj_attribute total_metadata_update_time_attr = __ATTR_RO(total_metadata_update_time);
 static struct kobj_attribute reset_counters_attr = __ATTR_WO(reset_counters);
 
 /* Array of attributes for the attribute group */
@@ -171,7 +195,10 @@ static struct attribute *page_coherence_attrs[] = {
     &fault_write_count_attr.attr,
     &replica_found_count_attr.attr,
     &replica_created_count_attr.attr,
-    &total_handling_time_attr.attr,
+    &total_page_fault_handling_time_attr.attr,
+    &total_coherence_transaction_time_attr.attr,
+    &total_page_replication_time_attr.attr,
+    &total_metadata_update_time_attr.attr,
     &reset_counters_attr.attr,
     NULL,
 };
@@ -1276,8 +1303,8 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&page_coherence_fault_read_count);
     }
     /* start timestamp */
-    ktime_t start, end, diff;
-    start = ktime_get();
+    ktime_t start_page_fault, start_coherence_transaction, start_page_replication, start_metadata_update, end_page_fault, coherence_transaction, page_replication, metadata_update, page_fault_latency;
+    start_page_fault = ktime_get();
 
     /* Check Metadata & get fault handle */
     fh = __start_local_fault_handling(original_pfn, write);
@@ -1308,6 +1335,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     int nr_ift = atomic64_read(&nr_in_flight_transactions);
 
     /* Issue Transaction */
+    start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
         pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
@@ -1329,6 +1357,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&nr_in_flight_transactions);
     }
 
+    start_page_replication = ktime_get();
     if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
         pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
 #ifdef CONFIG_DE_STIJL
@@ -1344,6 +1373,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     /* Update metadata */
+    start_metadata_update = ktime_get();
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
         pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         update_metadata(fh);
@@ -1365,9 +1395,15 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, original_pfn.val, pfn_t_to_pfn(*pfn));
     /* end timestamp and update total handling time */
-    end = ktime_get();
-    diff = ktime_sub(end, start);
-    atomic64_add(ktime_to_ns(diff), &page_coherence_total_handling_time_ns);
+    end_page_fault = ktime_get();
+    coherence_transaction = ktime_sub(start_page_replication, start_coherence_transaction);
+    page_replication = ktime_sub(start_metadata_update, start_page_replication);
+    metadata_update = ktime_sub(end_page_fault, start_metadata_update);
+    page_fault_latency = ktime_sub(end_page_fault, start_page_fault);
+    atomic64_add(ktime_to_ns(coherence_transaction), &page_coherence_total_coherence_transaction_time_ns);
+    atomic64_add(ktime_to_ns(page_replication), &page_coherence_total_page_replication_time_ns);
+    atomic64_add(ktime_to_ns(metadata_update), &page_coherence_total_metadata_update_time_ns);
+    atomic64_add(ktime_to_ns(page_fault_latency), &page_coherence_total_page_fault_handling_time_ns);
     return 0;
 }
 

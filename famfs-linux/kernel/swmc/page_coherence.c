@@ -101,6 +101,7 @@ static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_page_fault_handling_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_async_transaction_wait_time_ns = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_coherence_transaction_time_ns = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_page_replication_time_ns = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_metadata_update_time_ns = ATOMIC64_INIT(0);
@@ -136,6 +137,11 @@ static ssize_t total_page_fault_handling_time_show(struct kobject *kobj, struct 
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_page_fault_handling_time_ns));
 }
 
+static ssize_t total_async_transaction_wait_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_async_transaction_wait_time_ns));
+}
+
 static ssize_t total_coherence_transaction_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_coherence_transaction_time_ns));
@@ -167,6 +173,7 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_replica_found_count, 0);
         atomic64_set(&page_coherence_replica_created_count, 0);
         atomic64_set(&page_coherence_total_page_fault_handling_time_ns, 0);
+        atomic64_set(&page_coherence_total_async_transaction_wait_time_ns, 0);
         atomic64_set(&page_coherence_total_coherence_transaction_time_ns, 0);
         atomic64_set(&page_coherence_total_page_replication_time_ns, 0);
         atomic64_set(&page_coherence_total_metadata_update_time_ns, 0);
@@ -183,6 +190,7 @@ static struct kobj_attribute fault_write_count_attr = __ATTR_RO(fault_write_coun
 static struct kobj_attribute replica_found_count_attr = __ATTR_RO(replica_found_count);
 static struct kobj_attribute replica_created_count_attr = __ATTR_RO(replica_created_count);
 static struct kobj_attribute total_page_fault_handling_time_attr = __ATTR_RO(total_page_fault_handling_time);
+static struct kobj_attribute total_async_transaction_wait_time_attr = __ATTR_RO(total_async_transaction_wait_time);
 static struct kobj_attribute total_coherence_transaction_time_attr = __ATTR_RO(total_coherence_transaction_time);
 static struct kobj_attribute total_page_replication_time_attr = __ATTR_RO(total_page_replication_time);
 static struct kobj_attribute total_metadata_update_time_attr = __ATTR_RO(total_metadata_update_time);
@@ -196,6 +204,7 @@ static struct attribute *page_coherence_attrs[] = {
     &replica_found_count_attr.attr,
     &replica_created_count_attr.attr,
     &total_page_fault_handling_time_attr.attr,
+    &total_async_transaction_wait_time_attr.attr,
     &total_coherence_transaction_time_attr.attr,
     &total_page_replication_time_attr.attr,
     &total_metadata_update_time_attr.attr,
@@ -362,18 +371,18 @@ static void check_metadata(struct fault_handle *fh)
 }
 
 enum {
-    FH_ACTION_INVALID = 0x00,
-    FH_ACTION_UPDATE_METADATA=0x01,
+    FH_ACTION_INVALID = 0x01,
+    FH_ACTION_UPDATE_METADATA=0x02,
     /* For local fault */
-    FH_ACTION_ISSUE_SYNC_TRANSACTION = 0x02,
-    FH_ACTION_ISSUE_ASYNC_TRANSACTION = 0x04,
-    FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION = 0x08,
-    FH_ACTION_MAP_VPN_TO_PFN = 0x10,
-    FH_ACTION_FETCH_REPLICA = 0x20,
+    FH_ACTION_ISSUE_SYNC_TRANSACTION = 0x04,
+    FH_ACTION_ISSUE_ASYNC_TRANSACTION = 0x08,
+    FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION = 0x10,
+    FH_ACTION_MAP_VPN_TO_PFN = 0x20,
+    FH_ACTION_FETCH_REPLICA = 0x40,
     /* For remote fault */
-    FH_ACTION_WRITEBACK = 0x40,
-    FH_ACTION_INVALIDATE = 0x80,
-    FH_ACTION_RESPOND = 0x100,
+    FH_ACTION_WRITEBACK = 0x80,
+    FH_ACTION_INVALIDATE = 0x100,
+    FH_ACTION_RESPOND = 0x200,
 };
 
 #ifdef CONFIG_DE_STIJL
@@ -1303,7 +1312,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&page_coherence_fault_read_count);
     }
     /* start timestamp */
-    ktime_t start_page_fault, start_coherence_transaction, start_page_replication, start_metadata_update, end_page_fault, coherence_transaction, page_replication, metadata_update, page_fault_latency;
+    ktime_t start_page_fault, start_async_transaction_wait, start_coherence_transaction, start_page_replication, start_metadata_update, end_page_fault, async_transaction_wait, coherence_transaction, page_replication, metadata_update, page_fault_latency;
     start_page_fault = ktime_get();
 
     /* Check Metadata & get fault handle */
@@ -1323,10 +1332,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return -EINVAL;
     }
 
-    print_page_info(fh->original_page, "__page_coherence_fault: after __start_local_fault_handling");
+    // print_page_info(fh->original_page, "__page_coherence_fault: after __start_local_fault_handling");
 
     SetPageCoherence(fh->original_page);
 
+    start_async_transaction_wait = ktime_get();
     if (fh->fh_action & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
         pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         wait_for_async_transaction_completion(fh);
@@ -1393,13 +1403,15 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return VM_FAULT_RETRY;
     }
 
-    pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, original_pfn.val, pfn_t_to_pfn(*pfn));
+    // pr_info("[Info]%s: Page coherence fault handling completed successfully for pfn=0x%lx, mapped pfn=0x%lx\n", __func__, original_pfn.val, pfn_t_to_pfn(*pfn));
     /* end timestamp and update total handling time */
     end_page_fault = ktime_get();
+    async_transaction_wait = ktime_sub(start_coherence_transaction, start_async_transaction_wait);
     coherence_transaction = ktime_sub(start_page_replication, start_coherence_transaction);
     page_replication = ktime_sub(start_metadata_update, start_page_replication);
     metadata_update = ktime_sub(end_page_fault, start_metadata_update);
     page_fault_latency = ktime_sub(end_page_fault, start_page_fault);
+    atomic64_add(ktime_to_ns(async_transaction_wait), &page_coherence_total_async_transaction_wait_time_ns);
     atomic64_add(ktime_to_ns(coherence_transaction), &page_coherence_total_coherence_transaction_time_ns);
     atomic64_add(ktime_to_ns(page_replication), &page_coherence_total_page_replication_time_ns);
     atomic64_add(ktime_to_ns(metadata_update), &page_coherence_total_metadata_update_time_ns);

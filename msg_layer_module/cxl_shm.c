@@ -588,7 +588,7 @@ static int __init init_cxl_shm(void)
     pr_info(KERN_INFO "%s: Ring buffer size: %d messages\n", MODULE_NAME, CXL_KMSG_RBUF_SIZE);
     pr_info(KERN_INFO "%s: Window structure size: %lu bytes (0x%lx)\n", 
             MODULE_NAME, sizeof(struct cxl_kmsg_window), sizeof(struct cxl_kmsg_window));
-    pr_info(KERN_INFO "%s: Window offset (aligned): %d bytes (0x%x)\n", 
+        pr_info(KERN_INFO "%s: Window offset (aligned): %lu bytes (0x%lx)\n", 
             MODULE_NAME, SWMC_KMSG_WINDOW_OFFSET, SWMC_KMSG_WINDOW_OFFSET);
     
     if (node_id < 0 || node_id >= MAX_NODES) {

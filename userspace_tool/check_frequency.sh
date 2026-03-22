@@ -6,8 +6,8 @@ mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/measurement_$(date +%Y%m%d_%H%M%S).log"
 CSV_FILE="$LOG_DIR/measurement_$(date +%Y%m%d_%H%M%S).csv"
 
-# CSV 헤더 작성
-echo "Timestamp,Elapsed_Sec,Fault_Count,Fault_Read_Count,Fault_Write_Count,Frequency,Avg_Async_Transaction_Wait_Time_ns,Avg_Coherence_Transaction_Time_ns,Avg_Page_Replication_Time_ns,Avg_Metadata_Update_Time_ns,Avg_Page_Fault_Handling_Time_ns" > "$CSV_FILE"
+# CSV 헤더 작성 (raw counter values)
+echo "Timestamp,Elapsed_Sec,Fault_Count,Fault_Read_Count,Fault_Write_Count,Total_Async_Transaction_Wait_Time_ns,Total_Coherence_Transaction_Time_ns,Total_Page_Replication_Time_ns,Total_Metadata_Update_Time_ns,Total_Page_Fault_Handling_Time_ns" > "$CSV_FILE"
 
 # 1. 시작 대기
 echo "=========================================="
@@ -42,24 +42,8 @@ while [ $stop_measurement -eq 0 ]; do
     
     elapsed_sec=$(echo "scale=2; $elapsed / 1000000000" | bc)
     
-    if [ "$fault_count" -gt 0 ]; then
-        frequency=$(echo "scale=6; $fault_count / ($elapsed / 1000000000)" | bc)
-        avg_async_transaction_wait_time_ns=$(echo "scale=2; $total_async_transaction_wait_time_ns / $fault_count" | bc)
-        avg_coherence_transaction_time_ns=$(echo "scale=2; $total_coherence_transaction_time_ns / $fault_count" | bc)
-        avg_page_replication_time_ns=$(echo "scale=2; $total_page_replication_time_ns / $fault_count" | bc)
-        avg_meta_update_time_ns=$(echo "scale=2; $total_metadata_update_time_ns / $fault_count" | bc)
-        avg_page_fault_handling_time_ns=$(echo "scale=2; $total_page_fault_handling_time_ns / $fault_count" | bc)
-    else
-        frequency=0
-        avg_async_transaction_wait_time_ns=0
-        avg_coherence_transaction_time_ns=0
-        avg_page_replication_time_ns=0
-        avg_meta_update_time_ns=0
-        avg_page_fault_handling_time_ns=0
-    fi
-    
     # CSV에 append
-    echo "$(date '+%Y-%m-%d %H:%M:%S'),$elapsed_sec,$fault_count,$fault_read_count,$fault_write_count,$frequency,$avg_async_transaction_wait_time_ns,$avg_coherence_transaction_time_ns,$avg_page_replication_time_ns,$avg_meta_update_time_ns,$avg_page_fault_handling_time_ns" >> "$CSV_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S'),$elapsed_sec,$fault_count,$fault_read_count,$fault_write_count,$total_async_transaction_wait_time_ns,$total_coherence_transaction_time_ns,$total_page_replication_time_ns,$total_metadata_update_time_ns,$total_page_fault_handling_time_ns" >> "$CSV_FILE"
     
     # 다음 측정을 위해 카운터 리셋
     sudo sh -c "echo 1 > /sys/kernel/swmc/page_coherence/reset_counters"
@@ -91,9 +75,6 @@ print_result() {
     if [ "$fault_count" -eq 0 ]; then
         echo "No page faults recorded during the measurement period." | tee -a "$LOG_FILE"
     else
-        # elapsed(ns)를 초 단위로 변환하여 주파수 계산
-        frequency=$(echo "scale=6; $fault_count / ($elapsed / 1000000000)" | bc)
-        
         # 보기 좋게 경과 시간도 출력
         elapsed_sec=$(echo "scale=2; $elapsed / 1000000000" | bc)
         
@@ -103,7 +84,6 @@ print_result() {
         echo "Total Faults: $fault_count" | tee -a "$LOG_FILE"
         echo "Total Read Faults: $fault_read_count" | tee -a "$LOG_FILE"
         echo "Total Write Faults: $fault_write_count" | tee -a "$LOG_FILE"
-        echo "Page Fault Frequency: $frequency faults/second" | tee -a "$LOG_FILE"
         echo "Last Async Transaction Wait Time (Total): $total_async_transaction_wait_time_ns ns" | tee -a "$LOG_FILE"
         echo "Last Coherence Transaction Time (Total): $total_coherence_transaction_time_ns ns" | tee -a "$LOG_FILE"
         echo "Last Page Replication Time (Total): $total_page_replication_time_ns ns" | tee -a "$LOG_FILE"
@@ -116,24 +96,8 @@ print_result() {
 print_result
 
 # 최종 요약을 CSV 마지막 줄에 추가
-if [ "$fault_count" -gt 0 ]; then
-    frequency=$(echo "scale=6; $fault_count / ($elapsed / 1000000000)" | bc)
-    avg_async_transaction_wait_time_ns=$(echo "scale=2; $total_async_transaction_wait_time_ns / $fault_count" | bc)
-    avg_coherence_transaction_time_ns=$(echo "scale=2; $total_coherence_transaction_time_ns / $fault_count" | bc)
-    avg_page_replication_time_ns=$(echo "scale=2; $total_page_replication_time_ns / $fault_count" | bc)
-    avg_meta_update_time_ns=$(echo "scale=2; $total_metadata_update_time_ns / $fault_count" | bc)
-    avg_page_fault_handling_time_ns=$(echo "scale=2; $total_page_fault_handling_time_ns / $fault_count" | bc)
-else
-    frequency=0
-    avg_async_transaction_wait_time_ns=0
-    avg_coherence_transaction_time_ns=0
-    avg_page_replication_time_ns=0
-    avg_meta_update_time_ns=0
-    avg_page_fault_handling_time_ns=0
-fi
-
 elapsed_sec=$(echo "scale=2; $elapsed / 1000000000" | bc)
-echo "SUMMARY_$end_timestamp,$elapsed_sec,$fault_count,$fault_read_count,$fault_write_count,$frequency,$avg_async_transaction_wait_time_ns,$avg_coherence_transaction_time_ns,$avg_page_replication_time_ns,$avg_meta_update_time_ns,$avg_page_fault_handling_time_ns" >> "$CSV_FILE"
+echo "SUMMARY_$end_timestamp,$elapsed_sec,$fault_count,$fault_read_count,$fault_write_count,$total_async_transaction_wait_time_ns,$total_coherence_transaction_time_ns,$total_page_replication_time_ns,$total_metadata_update_time_ns,$total_page_fault_handling_time_ns" >> "$CSV_FILE"
 
 echo "" | tee -a "$LOG_FILE"
 echo "Log files saved:" | tee -a "$LOG_FILE"

@@ -1057,6 +1057,10 @@ static void invalidate_page(struct fault_handle *fh)
 
     // TODO: 여기 앞뒤로 dax folio에 대한 lock 없어도 제대로 동작하는지 확인 필요함.
 #ifdef CONFIG_DE_STIJL
+    if (!mapping) {
+        pr_err("[Error]%s: No mapping found for page replica of pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        return;
+    }
     unmap_mapping_pages(mapping, index, 1, false);
 #else
     int ret = flush_page_replica_locked(page_replica);

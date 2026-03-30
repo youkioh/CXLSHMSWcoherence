@@ -583,7 +583,7 @@ retry:
             } else {
                 retry_count++;
                 pr_info("[Info]%s: Retrying to lock page for pfn=0x%lx (retry count: %d)\n", __func__, original_pfn_val, retry_count);
-                msleep(1);
+                usleep_range(100, 200); // Sleep for a short time before retrying
                 goto retry;
             }
         }

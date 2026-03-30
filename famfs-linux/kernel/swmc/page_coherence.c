@@ -535,12 +535,14 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
     unsigned long original_pfn_val;
     int fk;
     struct page *original_page;
+    int retry_count = 0;
 
     original_pfn_val = pfn_t_to_pfn(original_pfn);
     original_page = pfn_to_page(original_pfn_val);
     found = false;
     fk = __fault_hash_key(original_pfn_val);
 
+retry:
 	spin_lock_irqsave(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
@@ -574,15 +576,23 @@ static struct fault_handle *__start_local_fault_handling(pfn_t original_pfn, boo
         /* Allocate new fault handle */
         if (!trylock_page(original_page)) {
             spin_unlock_irqrestore(&faults_lock[fk], flags);
-            // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
-            return NULL;
+            pr_info("[info]%s: Failed to lock page before allocating fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
+            if (retry_count > 3) {
+                pr_err("[Err]%s: Exceeded maximum retry count for locking page of pfn=0x%lx. Aborting fault handling.\n", __func__, original_pfn_val);
+                return NULL;
+            } else {
+                retry_count++;
+                pr_info("[Info]%s: Retrying to lock page for pfn=0x%lx (retry count: %d)\n", __func__, original_pfn_val, retry_count);
+                msleep(1);
+                goto retry;
+            }
         }
         fh = __alloc_fault_handle(original_pfn_val);   
     }
     
     if (unlikely(!fh)) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
-        // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        pr_err("[Err]%s: Failed to allocate fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
         return NULL;
     }
     
@@ -703,13 +713,13 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     /* Allocate new fault handle for remote processing */
     if (!trylock_page(original_page)) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
-        // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        pr_err("[Err]%s: Failed to lock page before allocating fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
         return NULL;
     }
     fh = __alloc_fault_handle(original_pfn_val); 
     if (!fh) {
         spin_unlock_irqrestore(&faults_lock[fk], flags);
-        // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        pr_err("[Err]%s: Failed to allocate fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
         return NULL;
     }
 
@@ -1354,7 +1364,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     if (!fh) {
         pr_info("[Info]%s: Need to retry local fault handling for pfn=0x%lx\n", __func__, original_pfn.val);
-        msleep(1);
+        // msleep(1);
         return VM_FAULT_RETRY;
     }
 
@@ -1431,7 +1441,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     /* Finish local fault handling */
     if (__finish_local_fault_handling(fh)) {
         pr_info("[Info]%s: We should retry local fault handling\n", __func__);
-        msleep(1);
+        // msleep(1);
         return VM_FAULT_RETRY;
     }
 

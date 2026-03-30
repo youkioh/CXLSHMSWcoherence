@@ -360,8 +360,8 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
     
-    pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
-            __func__, collected);
+    // pr_info("[%s] Collected %lu pages from inactive list for reclaim\n", 
+    //         __func__, collected);
     
     /* Second pass: process pages - check references and reclaim */
     list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
@@ -393,7 +393,7 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
         freed++;
     }
     
-    pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
+    // pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
     return freed;
 }
 
@@ -426,8 +426,8 @@ static unsigned int replica_age_active_to_inactive(unsigned long nr)
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
     
-    pr_info("[%s] Collected %lu pages from active list for aging\n", 
-            __func__, collected);
+    // pr_info("[%s] Collected %lu pages from active list for aging\n", 
+    //         __func__, collected);
     
     /* Second pass: check references and age appropriately */
     list_for_each_entry_safe(page_replica, tmp_page, &process_list, lru) {
@@ -453,7 +453,7 @@ static unsigned int replica_age_active_to_inactive(unsigned long nr)
         spin_unlock_irqrestore(&replica_lru_lock, flags);
     }
     
-    pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
+    // pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
     return aged;
 }
 
@@ -477,11 +477,11 @@ static unsigned long replica_shrink_count(struct shrinker *s,
     unsigned long flags, n;
     spin_lock_irqsave(&replica_lru_lock, flags);
     n  = __replica_list_len(&replica_inactive_lru);
-    pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
+    // pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
     n += __replica_list_len(&replica_active_lru) / REPLICA_ACTIVE_TO_INACTIVE_RATIO;
     spin_unlock_irqrestore(&replica_lru_lock, flags);
 
-    pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
+    // pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
     return n;
 }
 
@@ -497,7 +497,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     unsigned int age_mult = 1;
     unsigned int free_mult = 1;
     
-    pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
+    // pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
     while (freed < nr_to_scan) {
         aged = 0;
@@ -516,15 +516,15 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
             /* Step 1-1: Direct reclaim from inactive list */
             freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
-            pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
-                    __func__, inactive_len, freed);
+            // pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
+            //         __func__, inactive_len, freed);
             free_mult *= 2; // double the reclaim size next time
             continue;
         }
         
         /* Step 2: Not enough inactive pages, need to age active pages first */
-        pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
-                __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
+        // pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
+        //         __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
         
         while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
             aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
@@ -536,8 +536,8 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
                 break;
             }
             age_mult *= 2; // double the aging size next time
-            pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
-                    __func__, aged, active_len);
+            // pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
+            //         __func__, aged, active_len);
         }
         
         /* Step 3: Try reclaim again after aging */
@@ -551,8 +551,8 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         }
     }
 
-    pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
-            __func__, aged, inactive_len, freed);
+    // pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
+    //         __func__, aged, inactive_len, freed);
     
     return freed;
 }

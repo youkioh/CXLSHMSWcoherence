@@ -641,8 +641,8 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
  */
 static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bool is_write, long remote_acked_fault_count, int remote_node_id, int local_node_id)
 {
-    pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
-            __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
+    // pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
+    //         __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
     unsigned long flags;
     struct fault_handle *fh;
     bool found = false;

@@ -17,3 +17,11 @@ config DE_STIJL
 		Enable De Stijl for CXL shared memory environments.
 		
 		If unsure, say N.
+
+config DE_STIJL_NO_ASYNC
+	bool "De Stijl implementation without asynchronous transaction handling"
+	depends on DE_STIJL
+	help
+		Enable De Stijl for CXL shared memory environments, but disable asynchronous transaction handling.	
+
+		If unsure, say N.

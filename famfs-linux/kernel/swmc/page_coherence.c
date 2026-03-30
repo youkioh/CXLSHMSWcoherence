@@ -753,7 +753,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
     }
 
     if (is_REMOTE(fh)) {
-        pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         hlist_del_init(&fh->list);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
@@ -763,7 +763,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
         return true;
     }
 
-    pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
 
@@ -807,16 +807,16 @@ retry_broadcast_bmw:
     }
 
     void *wait_result = wait_at_station(ws);
-    pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
-            msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
+    // pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
+    //         msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
     
     if (wait_result == (void *)-1) {
-        pr_info("[Info]%s: Received NACK for %s message, aborting operation\n", __func__,
-        msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
+        // pr_info("[Info]%s: Received NACK for %s message, aborting operation\n", __func__,
+        // msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
         return -EAGAIN; // Indicate operation should be retried or aborted
     } else if (IS_ERR(wait_result)) {
         ret = PTR_ERR(wait_result);
-        pr_info("[Info]%s: Failed to wait at station: %d\n", __func__, ret);
+        // pr_info("[Info]%s: Failed to wait at station: %d\n", __func__, ret);
         return ret;
     }
 
@@ -876,13 +876,13 @@ static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr
     // Get Shared
     if (!is_NEEDWRITE(fh) && !is_SHARED(fh) && !is_MODIFIED(fh)) {
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
-        pr_info("[Info]%s: Issuing GetS transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Issuing GetS transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     }
 
     // Get Modified
     if (is_NEEDWRITE(fh) && !is_MODIFIED(fh)) {
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, pfn_to_pfn_t(fh->original_pfn_val), 0);
-        pr_info("[Info]%s: Issuing GetM/Upgrade transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Issuing GetM/Upgrade transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     }
 
     // if NACK recieved, return -EAGAIN to indicate retry is needed
@@ -930,8 +930,18 @@ static void update_metadata(struct fault_handle *fh)
             SetPageModified(fh->original_page);
             ClearPageShared(fh->original_page);
         } else { // Shared state
+#ifdef CONFIG_DE_STIJL_NO_ASYNC
             SetPageShared(fh->original_page);
             ClearPageModified(fh->original_page);
+#else
+            if (is_REPLICATED(fh)) {
+                SetPageShared(fh->original_page);
+                ClearPageModified(fh->original_page);
+            } else { // stale shared
+                SetPageShared(fh->original_page);
+                SetPageModified(fh->original_page);
+            }
+#endif
         }
     }
     // print_page_info(fh->original_page, "update_metadata");
@@ -1112,7 +1122,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         pr_err("[Error]%s: Invalid page order: %d\n", __func__, payload->page_order);
         return -EINVAL;
     }
-    pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx, page order=%d, original PFN=0x%lx.\n", __func__, payload->cxl_hdm_offset, payload->page_order, pfn_t_to_pfn(original_pfn));
+    // pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx, page order=%d, original PFN=0x%lx.\n", __func__, payload->cxl_hdm_offset, payload->page_order, pfn_t_to_pfn(original_pfn));
 
     // find fault handle for remote fault handling
     struct fault_handle *fh;
@@ -1126,7 +1136,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
     fh = __start_remote_fault_handling(original_pfn, is_write, remote_acked_fault_count, msg->header.from_nid, msg->header.to_nid);
     
     if (!fh) {
-        pr_info("[Info]%s: NACK remote fault handling\n", __func__);
+        // pr_info("[Info]%s: NACK remote fault handling\n", __func__);
         ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_NACK : SWMC_KMSG_TYPE_FETCH_NACK), msg->header.ws_id, msg->header.from_nid, payload);
         return ret;
     }
@@ -1140,21 +1150,21 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
     }
 
     if (fh->fh_action & FH_ACTION_WRITEBACK) {
-        pr_info("[Info]%s: Fault action includes WRITEBACK for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+        // pr_info("[Info]%s: Fault action includes WRITEBACK for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         writeback_page(fh);
     }
 
     if (fh->fh_action & FH_ACTION_INVALIDATE) {
-        pr_info("[Info]%s: Fault action includes INVALIDATE for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+        // pr_info("[Info]%s: Fault action includes INVALIDATE for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         invalidate_page(fh);
     }
 
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
-        pr_info("[Info]%s: Fault action includes UPDATE_METADATA for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
+        // pr_info("[Info]%s: Fault action includes UPDATE_METADATA for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         update_metadata(fh);
     }
 
-    pr_info("[Info]%s: ACK remote fault handling\n", __func__);
+    // pr_info("[Info]%s: ACK remote fault handling\n", __func__);
     ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);
 
     fk = __fault_hash_key(pfn_t_to_pfn(original_pfn));
@@ -1200,7 +1210,7 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
     // Decrease pending count atomically
     if (atomic_dec_and_test(&ws->pendings_count)) {
         // All invalidate ACKs received, wake up the wait station
-        pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
+        // pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
         atomic64_dec(&nr_in_flight_transactions); // Decrement in-flight transaction count
         atomic64_inc(&__local_acked_fault_count); // Increment remote ACK count
         if (ws->async_page) {
@@ -1360,7 +1370,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     start_async_transaction_wait = ktime_get();
     if (fh->fh_action & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
-        pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         wait_for_async_transaction_completion(fh);
     }
 
@@ -1370,7 +1380,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
-        pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction(fh, kaddr);
         if (ret) {
             pr_err("[Err]%s: Failed to issue page coherence transaction\n", __func__);
@@ -1379,7 +1389,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         }
         atomic64_inc(&nr_in_flight_transactions);
     } else if (fh->fh_action & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
-        pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
         if (ret) {
             pr_err("[Err]%s: Failed to issue async page coherence transaction\n", __func__);
@@ -1391,7 +1401,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     start_page_replication = ktime_get();
     if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
-        pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
 #ifdef CONFIG_DE_STIJL
         ret = fetch_page_replica(fh->original_page);
 #else
@@ -1407,14 +1417,14 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     /* Update metadata */
     start_metadata_update = ktime_get();
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
-        pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         update_metadata(fh);
     }
 
     // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
     if (fh->fh_action & FH_ACTION_MAP_VPN_TO_PFN) {
-        pr_info("[Info]%s: Mapping VPN to replica PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: Mapping VPN to PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         map_vpn_to_pfn(fh, pfn);
     }
 

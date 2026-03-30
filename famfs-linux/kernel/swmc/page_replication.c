@@ -844,8 +844,8 @@ int create_page_replica(struct page *page_original, unsigned int order)
         return -ENOMEM;
     }
 
-    pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
-            page_to_pfn(page_original), order);
+    // pr_info("[Info]%s: Creating page replica for original pfn 0x%lx (order=%u)\n", __func__, 
+    //         page_to_pfn(page_original), order);
 
     if (!PageCoherence(page_original)) {
         // pr_info("[%s] Original page %p is not marked for coherence\n", __func__, page_original);

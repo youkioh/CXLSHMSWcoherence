@@ -276,8 +276,8 @@ static int fuse_open(struct inode *inode, struct file *file)
 	if (!err) {
 		if (is_truncate)
 			truncate_pagecache(inode, 0);
-		else if (!(ff->open_flags & FOPEN_KEEP_CACHE))
-			invalidate_inode_pages2(inode->i_mapping);
+		// else if (!(ff->open_flags & FOPEN_KEEP_CACHE))
+		// 	 invalidate_inode_pages2(inode->i_mapping); // Sungsu: disable page cache for famfs now.
 	}
 	if (dax_truncate)
 		filemap_invalidate_unlock(inode->i_mapping);

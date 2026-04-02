@@ -852,6 +852,10 @@ int create_page_replica(struct page *page_original, unsigned int order)
         return -EPERM;
     }
 
+    if (PageLocked(page_original)) {
+        // pr_err("[%s] Original page %p should not be locked at the beginning\n", __func__, page_original);
+        return -EBUSY;
+    }
     if (!trylock_page(page_original)) {
         // pr_err("[%s] Original page %p is locked\n", __func__, page_original);
         err = -EBUSY;

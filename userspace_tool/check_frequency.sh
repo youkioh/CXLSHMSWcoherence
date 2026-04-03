@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # 로그 파일 설정
-LOG_DIR="./measurement_logs"
+SUFFIX="24GB_DE_STIJL"
+LOG_DIR="./measurement_logs/$SUFFIX"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/measurement_$(date +%Y%m%d_%H%M%S).log"
 CSV_FILE="$LOG_DIR/measurement_$(date +%Y%m%d_%H%M%S).csv"

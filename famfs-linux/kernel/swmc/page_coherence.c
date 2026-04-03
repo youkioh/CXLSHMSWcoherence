@@ -924,7 +924,7 @@ static int issue_page_coherence_transaction_async(struct fault_handle *fh)
     return 0;
 }
 
-static void update_metadata(struct fault_handle *fh)
+static void update_metadata(struct fault_handle *fh, bool is_async)
 {
     // if replicated or not, same action.
     if (is_REMOTE(fh)) {
@@ -944,12 +944,12 @@ static void update_metadata(struct fault_handle *fh)
             SetPageShared(fh->original_page);
             ClearPageModified(fh->original_page);
 #else
-            if (is_REPLICATED(fh)) {
-                SetPageShared(fh->original_page);
-                ClearPageModified(fh->original_page);
-            } else { // stale shared
+            if (is_async) { // stale shared
                 SetPageShared(fh->original_page);
                 SetPageModified(fh->original_page);
+            } else { // fresh shared
+                SetPageShared(fh->original_page);
+                ClearPageModified(fh->original_page);
             }
 #endif
         }
@@ -972,7 +972,7 @@ static void map_vpn_to_pfn(struct fault_handle *fh, pfn_t *pfn)
 }
 
 // Ring buffer to handle async transaction completions
-#define ASYNC_TRANSACTION_RING_SIZE 1024
+#define ASYNC_TRANSACTION_RING_SIZE 65536 // This size should match message ring buffer.
 struct async_transaction_work {
     struct page *original_page;
     bool nacked;
@@ -1171,7 +1171,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
 
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
         // pr_info("[Info]%s: Fault action includes UPDATE_METADATA for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
-        update_metadata(fh);
+        update_metadata(fh, false);
     }
 
     // pr_info("[Info]%s: ACK remote fault handling\n", __func__);
@@ -1387,6 +1387,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     int nr_ift = atomic64_read(&nr_in_flight_transactions);
 
     /* Issue Transaction */
+    bool is_async = false;
     start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
@@ -1399,6 +1400,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         }
         atomic64_inc(&nr_in_flight_transactions);
     } else if (fh->fh_action & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
+        is_async = true;
         // pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
         if (ret) {
@@ -1428,7 +1430,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     start_metadata_update = ktime_get();
     if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
         // pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-        update_metadata(fh);
+        update_metadata(fh, is_async);
     }
 
     // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);

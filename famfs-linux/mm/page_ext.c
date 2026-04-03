@@ -76,10 +76,6 @@ static struct page_ext_operations page_idle_ops __initdata = {
 };
 #endif
 
-#ifdef CONFIG_PAGE_COHERENCE
-extern struct page_ext_operations page_replication_ext_ops;
-#endif
-
 static struct page_ext_operations *page_ext_ops[] __initdata = {
 #ifdef CONFIG_PAGE_OWNER
 	&page_owner_ops,
@@ -92,9 +88,6 @@ static struct page_ext_operations *page_ext_ops[] __initdata = {
 #endif
 #ifdef CONFIG_PAGE_TABLE_CHECK
 	&page_table_check_ops,
-#endif
-#ifdef CONFIG_PAGE_COHERENCE
-	&page_replication_ext_ops,
 #endif
 };
 

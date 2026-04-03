@@ -371,6 +371,7 @@ static void check_metadata(struct fault_handle *fh)
 }
 
 enum {
+    FH_ACTION_NONE = 0x00,
     FH_ACTION_INVALID = 0x01,
     FH_ACTION_UPDATE_METADATA=0x02,
     /* For local fault */
@@ -399,12 +400,12 @@ static const unsigned long fh_action_table[32] = {
     /* Local Fault */
 #ifdef CONFIG_DE_STIJL_NO_ASYNC
     /* - - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
-    /* - - - S */ NULL,
-    /* - - M - */ NULL,
-    /* - - M S */ NULL,
+    /* - - - S */ FH_ACTION_NONE,
+    /* - - M - */ FH_ACTION_NONE,
+    /* - - M S */ FH_ACTION_NONE,
     /* - W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* - W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
-    /* - W M - */ NULL,
+    /* - W M - */ FH_ACTION_NONE,
     /* - W M S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* R - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
     /* R - - S */ FH_ACTION_MAP_VPN_TO_PFN,
@@ -416,12 +417,12 @@ static const unsigned long fh_action_table[32] = {
     /* R W M S */ FH_ACTION_INVALID,
 #else
     /* - - - - */ FH_ACTION_ISSUE_ASYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
-    /* - - - S */ NULL,
-    /* - - M - */ NULL,
-    /* - - M S */ NULL,
+    /* - - - S */ FH_ACTION_NONE,
+    /* - - M - */ FH_ACTION_NONE,
+    /* - - M S */ FH_ACTION_NONE,
     /* - W - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* - W - S */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
-    /* - W M - */ NULL,
+    /* - W M - */ FH_ACTION_NONE,
     /* - W M S */ FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION | FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA,
     /* R - - - */ FH_ACTION_ISSUE_SYNC_TRANSACTION | FH_ACTION_UPDATE_METADATA | FH_ACTION_MAP_VPN_TO_PFN | FH_ACTION_FETCH_REPLICA,
     /* R - - S */ FH_ACTION_MAP_VPN_TO_PFN,
@@ -1008,6 +1009,9 @@ static void async_transaction_daemon(void)
             // clear modified flag to change state from Shared stale to Shared
             ClearPageModified(work_page);
 
+            // Decrement in flight transactions number
+            atomic64_dec(&nr_in_flight_transactions);
+
             // Advance tail
             atomic_inc(&async_transaction_workqueue_tail);
         } else {
@@ -1023,7 +1027,7 @@ static void put_work_to_workqueue(struct page *async_page, struct wait_station *
     int tail = atomic_read(&async_transaction_workqueue_tail);
 
     if (((head + 1) % ASYNC_TRANSACTION_RING_SIZE) == (tail % ASYNC_TRANSACTION_RING_SIZE)) {
-        pr_err("[Err]%s: Async transaction workqueue is full, dropping work for page %p\n", __func__, async_page);
+        pr_err("[Err]%s: Async transaction workqueue is full, dropping work for page with original_pfn=0x%lx\n", __func__, page_to_pfn(async_page));
         return;
     }
 
@@ -1036,7 +1040,7 @@ static void put_work_to_workqueue(struct page *async_page, struct wait_station *
     }
 
     atomic_inc(&async_transaction_workqueue_head);
-    pr_info("[Info]%s: Added async transaction work for page %p to workqueue\n", __func__, async_page);
+    pr_info("[Info]%s: Added async transaction work for original_pfn=0x%lx to workqueue\n", __func__, page_to_pfn(async_page));
 
     put_wait_station(ws);
 }
@@ -1221,12 +1225,12 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
     if (atomic_dec_and_test(&ws->pendings_count)) {
         // All invalidate ACKs received, wake up the wait station
         // pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
-        atomic64_dec(&nr_in_flight_transactions); // Decrement in-flight transaction count
         atomic64_inc(&__local_acked_fault_count); // Increment remote ACK count
         if (ws->async_page) {
-            // put work to workqueue for daemon to complete async transaction
-            put_work_to_workqueue(ws->async_page, ws);
+            // Decrement in-flight transaction will be handled by async transaction daemon.
+            put_work_to_workqueue(ws->async_page, ws); // put work to workqueue for daemon to complete async transaction
         } else {
+            atomic64_dec(&nr_in_flight_transactions); // Decrement in-flight transaction count
             complete(&ws->pendings);
         }
     } else {
@@ -1363,7 +1367,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     // pr_info("[Info]%s: PG_coherence = %d for original_page=%p\n", __func__, PageCoherence(fh->original_page), fh->original_page);
 
     if (!fh) {
-        pr_info("[Info]%s: Need to retry local fault handling for pfn=0x%lx\n", __func__, original_pfn.val);
+        pr_info("[Info]%s: Need to retry local fault handling for pfn=0x%llx\n", __func__, original_pfn.val);
         // msleep(1);
         return VM_FAULT_RETRY;
     }

@@ -997,26 +997,27 @@ static void async_transaction_daemon(void)
                 // TODO: resend fetch message
             }
             // Process completion
-            pr_info("[Info]%s: Processing async transaction completion for original_pfn=0x%lx\n", __func__, page_to_pfn(work_page));
-                        
+            
             // flush cache lines of the page to eliminate stale data in CPU caches
             volatile char *kaddr = kmap(work_page);
             for (int i = 0; i < PAGE_SIZE; i += CL_SIZE) {
                 clflush((volatile void *)&kaddr[i]);
             }
             kunmap(work_page);
-
+            
             // clear modified flag to change state from Shared stale to Shared
             ClearPageModified(work_page);
-
+            
             // Decrement in flight transactions number
             atomic64_dec(&nr_in_flight_transactions);
-
+            
             // Advance tail
             atomic_inc(&async_transaction_workqueue_tail);
+
+            pr_info("[Info]%s: Processed async transaction completion for original_pfn=0x%lx, queue size: %d\n", __func__, page_to_pfn(work_page), (atomic_read(&async_transaction_workqueue_head) - atomic_read(&async_transaction_workqueue_tail) + ASYNC_TRANSACTION_RING_SIZE) % ASYNC_TRANSACTION_RING_SIZE);
         } else {
             // Sleep for a while
-            msleep(10);
+            msleep(1);
         }
     }
 }
@@ -1040,7 +1041,7 @@ static void put_work_to_workqueue(struct page *async_page, struct wait_station *
     }
 
     atomic_inc(&async_transaction_workqueue_head);
-    pr_info("[Info]%s: Added async transaction work for original_pfn=0x%lx to workqueue\n", __func__, page_to_pfn(async_page));
+    // pr_info("[Info]%s: Added async transaction work for original_pfn=0x%lx to workqueue\n", __func__, page_to_pfn(async_page));
 
     put_wait_station(ws);
 }
@@ -1392,6 +1393,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Issue Transaction */
     bool is_async = false;
+    if (nr_ift > WAIT_STATION_THRESHOLD) {
+        pr_info("[Info]%s: Number of in-flight transactions (%lld) exceeds threshold, issuing synchronous transaction for pfn=0x%lx\n", __func__, nr_ift, fh->original_pfn_val);
+    }
     start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {

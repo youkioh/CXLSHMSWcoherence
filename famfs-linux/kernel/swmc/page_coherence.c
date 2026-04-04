@@ -881,17 +881,14 @@ static void wait_for_async_transaction_completion(struct fault_handle *fh)
 // 여기서 transaction을 완료하고, coherence를 맞추기 위한 cache나 page에 대한 flush, fetch 등의 작업까지 담당한다.
 static int issue_page_coherence_transaction(struct fault_handle *fh, void *kaddr)
 {
-    int ret;
+    int ret = 0;
     
     /* broadcast fetch/invalidate message and wait for ACKs */
     // Get Shared
-    if (!is_NEEDWRITE(fh) && !is_SHARED(fh) && !is_MODIFIED(fh)) {
+    if (!is_NEEDWRITE(fh)) {
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, pfn_to_pfn_t(fh->original_pfn_val), 0);
         // pr_info("[Info]%s: Issuing GetS transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-    }
-
-    // Get Modified
-    if (is_NEEDWRITE(fh) && !is_MODIFIED(fh)) {
+    } else { // Get Modified
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, pfn_to_pfn_t(fh->original_pfn_val), 0);
         // pr_info("[Info]%s: Issuing GetM/Upgrade transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     }

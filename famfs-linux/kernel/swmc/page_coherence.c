@@ -1014,7 +1014,7 @@ static void async_transaction_daemon(void)
             // Advance tail
             atomic_inc(&async_transaction_workqueue_tail);
 
-            pr_info("[Info]%s: Processed async transaction completion for original_pfn=0x%lx, queue size: %d\n", __func__, page_to_pfn(work_page), (atomic_read(&async_transaction_workqueue_head) - atomic_read(&async_transaction_workqueue_tail) + ASYNC_TRANSACTION_RING_SIZE) % ASYNC_TRANSACTION_RING_SIZE);
+            // pr_info("[Info]%s: Processed async transaction completion for original_pfn=0x%lx, queue size: %d\n", __func__, page_to_pfn(work_page), (atomic_read(&async_transaction_workqueue_head) - atomic_read(&async_transaction_workqueue_tail) + ASYNC_TRANSACTION_RING_SIZE) % ASYNC_TRANSACTION_RING_SIZE);
         } else {
             // Sleep for a while
             msleep(1);

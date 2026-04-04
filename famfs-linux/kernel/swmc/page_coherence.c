@@ -251,7 +251,8 @@ struct fault_handle {
     unsigned long original_pfn_val;
     struct page *original_page;
     unsigned long fh_flags;
-    unsigned long fh_action;
+    unsigned long fh_action_local;
+    unsigned long fh_action_remote;
     refcount_t refs;
 
     struct completion *complete;
@@ -308,6 +309,8 @@ static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 	fh->original_pfn_val = pfn;
     fh->original_page = pfn_to_page(pfn);
 	fh->fh_flags = 0;
+    fh->fh_action_local = 0;
+    fh->fh_action_remote = 0;
     refcount_set(&fh->refs, 1); /* list ownership */
 
     fh->complete = NULL;
@@ -403,7 +406,7 @@ enum {
 };
 
 #ifdef CONFIG_DE_STIJL
-static const unsigned long fh_action_table[32] = {
+static const unsigned long fh_action_table_local[16] = {
 
     /*
      * R = replicated
@@ -450,8 +453,8 @@ static const unsigned long fh_action_table[32] = {
     /* R W M S */ FH_ACTION_INVALID,
 #endif
 
-    /* Remote Fault */
-
+};
+static const unsigned long fh_action_table_remote[16] = {
     /* - - - - */ FH_ACTION_RESPOND,
     /* - - - S */ FH_ACTION_RESPOND,
     /* - - M - */ FH_ACTION_RESPOND | FH_ACTION_WRITEBACK | FH_ACTION_UPDATE_METADATA,
@@ -470,7 +473,7 @@ static const unsigned long fh_action_table[32] = {
     /* R W M S */ FH_ACTION_INVALID,
 };
 #else
-static const unsigned long fh_action_table[32] = {
+static const unsigned long fh_action_table_local[16] = {
 
     /*
      * R = replicated
@@ -499,8 +502,8 @@ static const unsigned long fh_action_table[32] = {
     /* R W M - */ FH_ACTION_MAP_VPN_TO_PFN,
     /* R W M S */ FH_ACTION_INVALID,
 
-    /* Remote Fault */
-
+};
+static const unsigned long fh_action_table_remote[16] = {
     /* - - - - */ FH_ACTION_RESPOND,
     /* - - - S */ FH_ACTION_INVALID,
     /* - - M - */ FH_ACTION_INVALID,
@@ -520,17 +523,27 @@ static const unsigned long fh_action_table[32] = {
 };
 #endif
 
-static void set_fh_action(struct fault_handle *fh) {
+static void set_fh_action_local(struct fault_handle *fh)
+{
     unsigned long fh_action;
     unsigned int index;
 
-    index = fh->fh_flags & 0x1F; // Get lower 5 bits for index
+    index = fh->fh_flags & 0x0F; // Use R/W/M/S bits only
 
     // pr_info("[Info]%s: Determining action for FH flags=0x%lx (index=%u)\n", __func__, fh->fh_flags, index);
 
-    fh_action = fh_action_table[index];
+    fh_action = fh_action_table_local[index];
+    fh->fh_action_local = fh_action;
+}
 
-    fh->fh_action = fh_action;
+static void set_fh_action_remote(struct fault_handle *fh)
+{
+    unsigned long fh_action;
+    unsigned int index;
+
+    index = fh->fh_flags & 0x0F; // Use R/W/M/S bits only
+    fh_action = fh_action_table_remote[index];
+    fh->fh_action_remote = fh_action;
 }
 
 /**
@@ -623,7 +636,7 @@ retry:
     FH_CLEAR_FLAG_ALL(fh);
     is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
-    set_fh_action(fh);
+    set_fh_action_local(fh);
     if (!found)
         fault_handle_get(fh);
     
@@ -713,7 +726,8 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
 
     if (found) {
         pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx \n",
-                __func__, original_pfn_val);
+            __func__, original_pfn_val);
+        fault_handle_get(fh);
         if (is_REMOTE(fh)) {
             /* Another remote fault is already being processed */
             spin_unlock_irqrestore(&faults_lock[fk], flags);
@@ -730,8 +744,9 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
         /* Local fault is being processed, but remote fault has higher or equal priority */
         if (is_write) {
             set_RETRY(fh);
+            set_NEEDWRITE(fh);
         }
-        fault_handle_get(fh);
+        set_fh_action_remote(fh);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
         return fh;
@@ -753,10 +768,10 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
 
     /* Update flags for remote handling */
     FH_CLEAR_FLAG_ALL(fh);
-    set_REMOTE(fh);
+    set_REMOTE(fh); // allocated by remote fault handling
     is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
-    set_fh_action(fh);
+    set_fh_action_remote(fh);
     fault_handle_get(fh);
 
     // pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
@@ -1180,7 +1195,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         return ret;
     }
 
-    if (!fh->fh_action) {
+    if (!fh->fh_action_remote) {
         pr_err("[Error]%s: Invalid fault handle action for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);
         // Clean up fault handle
@@ -1188,17 +1203,17 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         return ret;
     }
 
-    if (fh->fh_action & FH_ACTION_WRITEBACK) {
+    if (fh->fh_action_remote & FH_ACTION_WRITEBACK) {
         // pr_info("[Info]%s: Fault action includes WRITEBACK for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         writeback_page(fh);
     }
 
-    if (fh->fh_action & FH_ACTION_INVALIDATE) {
+    if (fh->fh_action_remote & FH_ACTION_INVALIDATE) {
         // pr_info("[Info]%s: Fault action includes INVALIDATE for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         invalidate_page(fh);
     }
 
-    if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
+    if (fh->fh_action_remote & FH_ACTION_UPDATE_METADATA) {
         // pr_info("[Info]%s: Fault action includes UPDATE_METADATA for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
         update_metadata(fh, false);
     }
@@ -1380,7 +1395,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return VM_FAULT_RETRY;
     }
 
-    if (fh->fh_action == FH_ACTION_INVALID) {
+    if (fh->fh_action_local == FH_ACTION_INVALID) {
         pr_err("[Err]%s: Invalid fault action for local fault\n", __func__);
         __finish_local_fault_handling(fh);
         return -EINVAL;
@@ -1391,7 +1406,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     SetPageCoherence(fh->original_page);
 
     start_async_transaction_wait = ktime_get();
-    if (fh->fh_action & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
+    if (fh->fh_action_local & FH_ACTION_WAIT_FOR_ASYNC_TRANSACTION) {
         // pr_info("[Info]%s: Waiting for async transaction completion for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         wait_for_async_transaction_completion(fh);
     }
@@ -1405,7 +1420,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     // }
     start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
-    if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
+    if (fh->fh_action_local & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {
         // pr_info("[Info]%s: Issuing synchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction(fh, kaddr);
         if (ret) {
@@ -1414,7 +1429,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
             return ret;
         }
         atomic64_inc(&nr_in_flight_transactions);
-    } else if (fh->fh_action & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
+    } else if (fh->fh_action_local & FH_ACTION_ISSUE_ASYNC_TRANSACTION) {
         is_async = true;
         // pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
@@ -1427,7 +1442,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     start_page_replication = ktime_get();
-    if (fh->fh_action & FH_ACTION_FETCH_REPLICA) {
+    if (fh->fh_action_local & FH_ACTION_FETCH_REPLICA) {
         // pr_info("[Info]%s: Fetching page replica for pfn=0x%lx\n", __func__, fh->original_pfn_val);
 #ifdef CONFIG_DE_STIJL
         ret = fetch_page_replica(fh->original_page);
@@ -1443,14 +1458,14 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Update metadata */
     start_metadata_update = ktime_get();
-    if (fh->fh_action & FH_ACTION_UPDATE_METADATA) {
+    if (fh->fh_action_local & FH_ACTION_UPDATE_METADATA) {
         // pr_info("[Info]%s: Updating metadata for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         update_metadata(fh, is_async);
     }
 
     // pr_info("[Info]%s: Mapping PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     /* Map VPN to PFN */
-    if (fh->fh_action & FH_ACTION_MAP_VPN_TO_PFN) {
+    if (fh->fh_action_local & FH_ACTION_MAP_VPN_TO_PFN) {
         // pr_info("[Info]%s: Mapping VPN to PFN for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         map_vpn_to_pfn(fh, pfn);
     }

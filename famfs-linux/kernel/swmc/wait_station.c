@@ -27,7 +27,7 @@ struct wait_station *get_wait_station_multiple(struct task_struct *tsk, int coun
 	set_bit(id, wait_station_available);
 	spin_unlock(&wait_station_lock);
 
-	ws->id = id;b
+	ws->id = id;
 	ws->pid = tsk->pid;
 	ws->async_page = NULL;
 	ws->private = (void *)0xbad0face;

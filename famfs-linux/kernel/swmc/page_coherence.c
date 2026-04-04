@@ -35,6 +35,7 @@
 #include "wait_station.h"
 #include <linux/syscalls.h>
 #include <linux/ktime.h>
+#include <linux/refcount.h>
 
 #ifdef CONFIG_PAGE_COHERENCE
 
@@ -251,6 +252,7 @@ struct fault_handle {
     struct page *original_page;
     unsigned long fh_flags;
     unsigned long fh_action;
+    refcount_t refs;
 
     struct completion *complete;
 };
@@ -306,11 +308,25 @@ static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 	fh->original_pfn_val = pfn;
     fh->original_page = pfn_to_page(pfn);
 	fh->fh_flags = 0;
+    refcount_set(&fh->refs, 1); /* list ownership */
 
     fh->complete = NULL;
 
 	hlist_add_head(&fh->list, &faults[fk]);
 	return fh;
+}
+
+static inline void fault_handle_get(struct fault_handle *fh)
+{
+    refcount_inc(&fh->refs);
+}
+
+static inline void fault_handle_put(struct fault_handle *fh)
+{
+    if (refcount_dec_and_test(&fh->refs)) {
+        unlock_page(fh->original_page);
+        kmem_cache_free(__fault_handle_cache, fh);
+    }
 }
 
 static inline bool has_lower_priority(struct fault_handle *fh, bool is_write, long remote_acked_fault_count, int remote_node_id, int local_node_id)
@@ -557,6 +573,7 @@ retry:
 
     if (found) {
         pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, current->pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
+        fault_handle_get(fh);
         DECLARE_COMPLETION_ONSTACK(complete);
         fh->complete = &complete;
 
@@ -568,8 +585,13 @@ retry:
         if (is_NEEDWRITE(fh)) {
             pr_info("[Info]%s: Fault handling for pfn=0x%lx needs to be redone to release DAX entry lock\n",
                     __func__, original_pfn_val);
-            hlist_del_init(&fh->list);
-            kmem_cache_free(__fault_handle_cache, fh);
+            spin_lock_irqsave(&faults_lock[fk], flags);
+            if (!hlist_unhashed(&fh->list)) {
+                hlist_del_init(&fh->list);
+                fault_handle_put(fh); /* drop list ownership */
+            }
+            spin_unlock_irqrestore(&faults_lock[fk], flags);
+            fault_handle_put(fh);
             return NULL;
         }
         spin_lock_irqsave(&faults_lock[fk], flags);
@@ -602,6 +624,8 @@ retry:
     is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
     set_fh_action(fh);
+    if (!found)
+        fault_handle_get(fh);
     
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
@@ -634,11 +658,13 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
     }
 
     // pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
-    hlist_del_init(&fh->list);
+    if (!hlist_unhashed(&fh->list)) {
+        hlist_del_init(&fh->list);
+        fault_handle_put(fh); /* drop list ownership */
+    }
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
-    unlock_page(fh->original_page);
-    kmem_cache_free(__fault_handle_cache, fh);
+    fault_handle_put(fh); /* drop caller ownership */
 
     return retry;
 }
@@ -705,6 +731,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
         if (is_write) {
             set_RETRY(fh);
         }
+        fault_handle_get(fh);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
         return fh;
@@ -730,6 +757,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     is_write ? set_NEEDWRITE(fh) : clear_NEEDWRITE(fh);
     check_metadata(fh);
     set_fh_action(fh);
+    fault_handle_get(fh);
 
     // pr_info("[Info]%s: Fault handle action is 0x%lx for pfn=0x%lx\n", __func__, fh->fh_action, original_pfn_val);
 
@@ -760,23 +788,26 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
         fh->complete = NULL;
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        fault_handle_put(fh); /* drop caller ownership */
         return false;
     }
 
     if (is_REMOTE(fh)) {
         // pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
-        hlist_del_init(&fh->list);
+        if (!hlist_unhashed(&fh->list)) {
+            hlist_del_init(&fh->list);
+            fault_handle_put(fh); /* drop list ownership */
+        }
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
-    
-        unlock_page(fh->original_page);
-        kmem_cache_free(__fault_handle_cache, fh);
+        fault_handle_put(fh); /* drop caller ownership */
         return true;
     }
 
     // pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+    fault_handle_put(fh); /* drop caller ownership */
 
     return false;
 }
@@ -1138,12 +1169,8 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
 
     // find fault handle for remote fault handling
     struct fault_handle *fh;
-    struct fault_handle *_tmp_fh;
-    bool exist = false;
     long remote_acked_fault_count = payload->acked_fault_count;
-    unsigned long flags;
     bool is_write = (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE);
-    int fk;
 
     fh = __start_remote_fault_handling(original_pfn, is_write, remote_acked_fault_count, msg->header.from_nid, msg->header.to_nid);
     
@@ -1178,23 +1205,6 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
 
     // pr_info("[Info]%s: ACK remote fault handling\n", __func__);
     ret = swmc_kmsg_unicast((is_write ? SWMC_KMSG_TYPE_INVALIDATE_ACK : SWMC_KMSG_TYPE_FETCH_ACK), msg->header.ws_id, msg->header.from_nid, payload);
-
-    fk = __fault_hash_key(pfn_t_to_pfn(original_pfn));
-
-    spin_lock_irqsave(&faults_lock[fk], flags);
-    hlist_for_each_entry(_tmp_fh, &faults[fk], list) {
-        if (_tmp_fh->original_pfn_val == pfn_t_to_pfn(original_pfn)) {
-            exist = true;
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&faults_lock[fk], flags);
-    // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
-
-    if(!exist) {
-        pr_info("[Info]%s: Fault handle already deleted for pfn=0x%lx\n", __func__, pfn_t_to_pfn(original_pfn));
-        return 0;
-    }
 
     __finish_remote_fault_handling(fh);
 

@@ -27,7 +27,7 @@ struct wait_station *get_wait_station_multiple(struct task_struct *tsk, int coun
 	set_bit(id, wait_station_available);
 	spin_unlock(&wait_station_lock);
 
-	ws->id = id;
+	ws->id = id;b
 	ws->pid = tsk->pid;
 	ws->async_page = NULL;
 	ws->private = (void *)0xbad0face;
@@ -58,7 +58,7 @@ EXPORT_SYMBOL_GPL(put_wait_station);
 
 void *wait_at_station(struct wait_station *ws)
 {
-	void *ret;
+	void *ret = NULL;
 	if (!try_wait_for_completion(&ws->pendings)) {
 		if (wait_for_completion_io_timeout(&ws->pendings, 30 * HZ) == 0) {
 			ret = ERR_PTR(-ETIMEDOUT);

@@ -1393,9 +1393,9 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
 
     /* Issue Transaction */
     bool is_async = false;
-    if (nr_ift > WAIT_STATION_THRESHOLD) {
-        pr_info("[Info]%s: Number of in-flight transactions (%lld) exceeds threshold, issuing synchronous transaction for pfn=0x%lx\n", __func__, nr_ift, fh->original_pfn_val);
-    }
+    // if (nr_ift > WAIT_STATION_THRESHOLD) { // for debugging
+    //     pr_info("[Info]%s: Number of in-flight transactions (%lld) exceeds threshold, issuing synchronous transaction for pfn=0x%lx\n", __func__, nr_ift, fh->original_pfn_val);
+    // }
     start_coherence_transaction = ktime_get();
     // Synchronous transaction if requested or if over threshold
     if (fh->fh_action & FH_ACTION_ISSUE_SYNC_TRANSACTION || nr_ift > WAIT_STATION_THRESHOLD) {

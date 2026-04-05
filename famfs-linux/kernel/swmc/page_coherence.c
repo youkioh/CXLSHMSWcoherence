@@ -48,14 +48,6 @@
 // dummy base PA for CXL HDM 
 static unsigned long cxl_hdm_base = 0x1e80000000; // Default value, can be set by external module
 
-/* Page coherence fault statistics */
-static atomic64_t page_coherence_fault_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_fault_read_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
-static atomic64_t page_coherence_total_handling_time_ns = ATOMIC64_INIT(0);
-
 /**
  * set_cxl_hdm_base - Set the CXL HDM base address
  * @base_addr: CXL HDM base physical address
@@ -818,7 +810,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
     }
 
     /* start timestamp */
-    ktime_t start_page_fault, start_coherence_transaction, start_page_replication, start_metadata_update, end_page_fault;
+    ktime_t start_page_fault, start_coherence_transaction, start_page_replication, start_metadata_update;
     ktime_t end_page_fault, end_coherence_transaction, end_page_replication, end_metadata_update;
     ktime_t coherence_transaction, page_replication, metadata_update, page_fault_latency;
     start_page_fault = ktime_get();
@@ -1081,9 +1073,9 @@ map_pfn:
     end_metadata_update = ktime_get();
     metadata_update = ktime_sub(end_metadata_update, start_metadata_update);
     atomic64_add(ktime_to_ns(metadata_update), &page_coherence_total_metadata_update_time_ns);
-    end = ktime_get();
-    page_fault_latency = ktime_sub(end, start_page_fault);
-    atomic64_add(ktime_to_ns(page_fault_latency), &page_coherence_total_page_fault_time_ns);
+    end_page_fault = ktime_get();
+    page_fault_latency = ktime_sub(end_page_fault, start_page_fault);
+    atomic64_add(ktime_to_ns(page_fault_latency), &page_coherence_total_page_fault_handling_time_ns);
     return 0;
 }
 
@@ -1169,8 +1161,8 @@ int __init page_coherence_init(void)
         return ret;
     }
 
-    pr_info("[Err]%s: Page coherence subsystem initialized successfully\n", __func__);
-    pr_info("[Err]%s: Sysfs interface available at /sys/kernel/swmc/page_coherence/\n", __func__);
+    pr_info("[Info]%s: Page coherence subsystem initialized successfully\n", __func__);
+    pr_info("[Info]%s: Sysfs interface available at /sys/kernel/swmc/page_coherence/\n", __func__);
     return 0;
 }
 

@@ -85,6 +85,18 @@ EXPORT_SYMBOL(get_cxl_hdm_base);
  * SYSFS INTERFACE FOR PAGE COHERENCE FAULT STATISTICS
  * ============================================================================= */
 
+/* Page coherence fault statistics */
+static atomic64_t page_coherence_fault_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_fault_read_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_fault_write_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_replica_found_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_replica_created_count = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_page_fault_handling_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_async_transaction_wait_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_coherence_transaction_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_page_replication_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_metadata_update_time_ns = ATOMIC64_INIT(0);
+
 /* Sysfs show functions for fault statistics */
 static ssize_t fault_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
@@ -111,11 +123,30 @@ static ssize_t replica_created_count_show(struct kobject *kobj, struct kobj_attr
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_replica_created_count));
 }
 
-static ssize_t total_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+static ssize_t total_page_fault_handling_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_handling_time_ns));
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_page_fault_handling_time_ns));
 }
 
+static ssize_t total_async_transaction_wait_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_async_transaction_wait_time_ns));
+}
+
+static ssize_t total_coherence_transaction_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_coherence_transaction_time_ns));
+}
+
+static ssize_t total_page_replication_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_page_replication_time_ns));
+}
+
+static ssize_t total_metadata_update_time_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_metadata_update_time_ns));
+}
 
 /* Sysfs store function for resetting counters */
 static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute *attr,
@@ -132,7 +163,11 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_fault_write_count, 0);
         atomic64_set(&page_coherence_replica_found_count, 0);
         atomic64_set(&page_coherence_replica_created_count, 0);
-        atomic64_set(&page_coherence_total_handling_time_ns, 0);
+        atomic64_set(&page_coherence_total_page_fault_handling_time_ns, 0);
+        atomic64_set(&page_coherence_total_async_transaction_wait_time_ns, 0);
+        atomic64_set(&page_coherence_total_coherence_transaction_time_ns, 0);
+        atomic64_set(&page_coherence_total_page_replication_time_ns, 0);
+        atomic64_set(&page_coherence_total_metadata_update_time_ns, 0);
         pr_info("[Info]%s: All fault counters reset\n", __func__);
     }
     
@@ -145,7 +180,11 @@ static struct kobj_attribute fault_read_count_attr = __ATTR_RO(fault_read_count)
 static struct kobj_attribute fault_write_count_attr = __ATTR_RO(fault_write_count);
 static struct kobj_attribute replica_found_count_attr = __ATTR_RO(replica_found_count);
 static struct kobj_attribute replica_created_count_attr = __ATTR_RO(replica_created_count);
-static struct kobj_attribute total_handling_time_attr = __ATTR_RO(total_handling_time);
+static struct kobj_attribute total_page_fault_handling_time_attr = __ATTR_RO(total_page_fault_handling_time);
+static struct kobj_attribute total_async_transaction_wait_time_attr = __ATTR_RO(total_async_transaction_wait_time);
+static struct kobj_attribute total_coherence_transaction_time_attr = __ATTR_RO(total_coherence_transaction_time);
+static struct kobj_attribute total_page_replication_time_attr = __ATTR_RO(total_page_replication_time);
+static struct kobj_attribute total_metadata_update_time_attr = __ATTR_RO(total_metadata_update_time);
 static struct kobj_attribute reset_counters_attr = __ATTR_WO(reset_counters);
 
 /* Array of attributes for the attribute group */
@@ -155,7 +194,11 @@ static struct attribute *page_coherence_attrs[] = {
     &fault_write_count_attr.attr,
     &replica_found_count_attr.attr,
     &replica_created_count_attr.attr,
-    &total_handling_time_attr.attr,
+    &total_page_fault_handling_time_attr.attr,
+    &total_async_transaction_wait_time_attr.attr,
+    &total_coherence_transaction_time_attr.attr,
+    &total_page_replication_time_attr.attr,
+    &total_metadata_update_time_attr.attr,
     &reset_counters_attr.attr,
     NULL,
 };
@@ -202,7 +245,7 @@ static inline int __fault_hash_key(unsigned long pfn)
 
 static struct fault_handle *__alloc_fault_handle(unsigned long pfn)
 {
-    pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx\n", __func__, pfn);
+    // pr_info("[Info]%s: Allocating fault handle for pfn=0x%lx\n", __func__, pfn);
 	struct fault_handle *fh = kmem_cache_alloc(__fault_handle_cache, GFP_ATOMIC);
 	int fk = __fault_hash_key(pfn);
 	
@@ -266,7 +309,7 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
 							 pfn_t original_pfn, 
                              bool is_write)
 {
-    pr_info("[Info]%s: Starting local fault handling for pid=%d, pfn=0x%lx, is_write=%s\n", __func__, pid, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false");
+    // pr_info("[Info]%s: Starting local fault handling for pid=%d, pfn=0x%lx, is_write=%s\n", __func__, pid, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false");
 	unsigned long flags;
 	struct fault_handle *fh;
 	bool found = false;
@@ -286,14 +329,14 @@ static struct fault_handle *__start_local_fault_handling(pid_t pid,
     }
 
     if (found) {
-        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
+        // pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx, PID=%d, %s.", __func__, original_pfn_val, pid, fh->fh_flags & FH_STATE_REMOTE ? "REMOTE" : "LOCAL");
         DECLARE_COMPLETION_ONSTACK(complete);
         fh->complete = &complete;
 
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
         wait_for_completion(&complete);
-        pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, pid);
+        // pr_info("[Info]%s: Waked up from existing fault handle for pfn=0x%lx, PID=%d\n", __func__, original_pfn_val, pid);
 
         if (fh->fh_flags & FH_STATE_WRITE) {
             pr_info("[Info]%s: Fault handling for pfn=0x%lx needs to be redone to release DAX entry lock\n",
@@ -349,7 +392,7 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
         need_redo = true;
     }
 
-    pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Completed local fault handling for pfn=0x%lx, deleting fault handle.\n", __func__, fh->original_pfn_val);
     hlist_del_init(&fh->list);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
@@ -366,8 +409,8 @@ static bool __finish_local_fault_handling(struct fault_handle *fh)
  */
 static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bool is_write, long remote_acked_fault_count, int remote_node_id, int local_node_id)
 {
-    pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
-            __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
+    // pr_info("[Info]%s: Starting remote fault handling for pfn=0x%lx, is_write=%s, remote_acked_fault_count=%ld, remote_node_id=%d, local_node_id=%d\n", 
+    //         __func__, pfn_t_to_pfn(original_pfn), is_write ? "true" : "false", remote_acked_fault_count, remote_node_id, local_node_id);
     unsigned long flags;
     struct fault_handle *fh;
     bool found = false;
@@ -399,8 +442,8 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
      */
 
     if (found) {
-        pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx \n",
-                __func__, original_pfn_val);
+        // pr_info("[Info]%s: Found existing fault handle for pfn=0x%lx \n",
+        //         __func__, original_pfn_val);
         if (fh->fh_flags & FH_STATE_REMOTE) {
             /* Another remote fault is already being processed */
             spin_unlock_irqrestore(&faults_lock[fk], flags);
@@ -456,7 +499,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
     // pr_info("[Info]%s: Acquired lock for fault hash bucket %d\n", __func__, fk);
 
     if (fh->complete) {
-        pr_info("[Info]%s: There is a local fault waiting for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: There is a local fault waiting for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         complete(fh->complete);
         fh->complete = NULL;
         spin_unlock_irqrestore(&faults_lock[fk], flags);
@@ -465,7 +508,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
     }
 
     if (fh->fh_flags & FH_STATE_REMOTE) {
-        pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+        // pr_info("[Info]%s: No local fault waiting, deleting fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         hlist_del_init(&fh->list);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
@@ -474,7 +517,7 @@ static bool __finish_remote_fault_handling(struct fault_handle *fh)
         return true;
     }
 
-    pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
+    // pr_info("[Info]%s: Completed remote fault handling without freeing fault handle for pfn=0x%lx\n", __func__, fh->original_pfn_val);
     spin_unlock_irqrestore(&faults_lock[fk], flags);
     // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
 
@@ -506,7 +549,7 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         pr_err("[Error]%s: Invalid page order: %d\n", __func__, payload->page_order);
         return -EINVAL;
     }
-    pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx, page order=%d, original PFN=0x%lx.\n", __func__, payload->cxl_hdm_offset, payload->page_order, pfn_t_to_pfn(original_pfn));
+    // pr_info("[Info]%s: Handling fetch/invalidate message for offset 0x%lx, page order=%d, original PFN=0x%lx.\n", __func__, payload->cxl_hdm_offset, payload->page_order, pfn_t_to_pfn(original_pfn));
 
     // find fault handle for remote fault handling
     struct fault_handle *fh;
@@ -525,34 +568,34 @@ static int swmc_kmsg_handle_fetch_or_invalidate(struct swmc_kmsg_message *msg)
         return ret;
     }
 
-    pr_info("[Info]%s: ACK remote fault handling\n", __func__);
+    // pr_info("[Info]%s: ACK remote fault handling\n", __func__);
 
     // find page replica from original pfn
     page_replica = get_page_replica_with_ref(original_pfn, payload->page_order);
 
     if (!page_replica) { // I -> I
-        pr_info("[Info]%s: No replica page found (I->I transition)\n", __func__);
+        // pr_info("[Info]%s: No replica page found (I->I transition)\n", __func__);
     } else if (!is_write) {
         // M -> S, S -> S
-        pr_info("[Info]%s: Page replica found (M->S or S->S transition)\n", __func__);
+        // pr_info("[Info]%s: Page replica found (M->S or S->S transition)\n", __func__);
 
         /* For M->S transition: remove write permissions from all mappings
          * For S->S transition: already read-only, so writeback will check if dirty
          * In both cases, writeback_page_replica() will handle it.
          */
         ret = writeback_page_replica(page_replica);
-        if (ret == REPLICA_SUCCESS) {
-            pr_info("[Info]%s: M->S transition, successfully wrote back page relica.\n", __func__);
-        } else if (ret == REPLICA_SHARED_STATE) {
-            pr_info("[Info]%s: S->S transition, no writeback needed\n", __func__);
-        } else {
-            pr_info("[Info]%s: Failed to write-protect page replica: \n", __func__);
-        }
+        // if (ret == REPLICA_SUCCESS) {
+        //     pr_info("[Info]%s: M->S transition, successfully wrote back page relica.\n", __func__);
+        // } else if (ret == REPLICA_SHARED_STATE) {
+        //     pr_info("[Info]%s: S->S transition, no writeback needed\n", __func__);
+        // } else {
+        //     pr_info("[Info]%s: Failed to write-protect page replica: \n", __func__);
+        // }
         /* Release reference obtained from get_page_replica_with_ref() */
         put_page_replica_ref(page_replica);
     } else {
         // S -> I (M -> I is not allowed)
-        pr_info("[Info]%s: Page replica found (S->I transition)\n", __func__);
+        // pr_info("[Info]%s: Page replica found (S->I transition)\n", __func__);
 
         /* For M->I or S->I transitions, clean up the page replica
          * This do not includes flushing dirty data back to original.
@@ -617,19 +660,19 @@ static int swmc_kmsg_handle_ack_or_nack(struct swmc_kmsg_message *msg)
     }
 
     if (msg->header.type == SWMC_KMSG_TYPE_INVALIDATE_NACK || msg->header.type == SWMC_KMSG_TYPE_FETCH_NACK) {
-        pr_info("[Info]%s: Received NACK for wait station %d\n", __func__, msg->header.ws_id);
+        // pr_info("[Info]%s: Received NACK for wait station %d\n", __func__, msg->header.ws_id);
         ws->private = (void *)-1; // Indicate NACK received
     }
 
     // Decrease pending count atomically
     if (atomic_dec_and_test(&ws->pendings_count)) {
         // All invalidate ACKs received, wake up the wait station
-        pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
+        // pr_info("[Info]%s: All ACKs/NACKs received for wait station %d\n", __func__, msg->header.ws_id);
         atomic64_inc(&__local_acked_fault_count); // Increment remote ACK count
         complete(&ws->pendings);
     } else {
-        pr_info("[Info]%s: ACK/NACK received, pending count: %d\n", __func__,
-                atomic_read(&ws->pendings_count));
+        // pr_info("[Info]%s: ACK/NACK received, pending count: %d\n", __func__,
+        //         atomic_read(&ws->pendings_count));
     }
 
     return 0;
@@ -690,8 +733,8 @@ static int broadcast_message_and_wait(enum swmc_kmsg_type msg_type,
         return ret;
     }
 
-    pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
-            msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
+    // pr_info("[Info]%s: Waiting done, received response for %s message\n", __func__,
+    //         msg_type == SWMC_KMSG_TYPE_FETCH ? "fetch" : "invalidate");
     return 0;
 }
 
@@ -774,8 +817,11 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         atomic64_inc(&page_coherence_fault_read_count);
     }
 
-    ktime_t start, end, diff;
-    start = ktime_get();
+    /* start timestamp */
+    ktime_t start_page_fault, start_coherence_transaction, start_page_replication, start_metadata_update, end_page_fault;
+    ktime_t end_page_fault, end_coherence_transaction, end_page_replication, end_metadata_update;
+    ktime_t coherence_transaction, page_replication, metadata_update, page_fault_latency;
+    start_page_fault = ktime_get();
 
     if (!vmf || !iter || !kaddr || !pfn) {
         pr_err("[Err]%s: Invalid parameters\n", __func__);
@@ -792,8 +838,8 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         return -EINVAL;
     }
 
-    pr_info("[Info]%s: Fault at 0x%lx: size=%zu order=%u original pfn=0x%lx\n",
-        __func__, vmf->address, size, order, pfn_t_to_pfn(original_pfn));
+    // pr_info("[Info]%s: Fault at 0x%lx: size=%zu order=%u original pfn=0x%lx\n",
+    //     __func__, vmf->address, size, order, pfn_t_to_pfn(original_pfn));
 
     // Get CXL HDM offset for this fault
     cxl_hdm_offset = pfn_t_to_pfn(original_pfn) * PAGE_SIZE - cxl_hdm_base;
@@ -825,14 +871,14 @@ redo:
     if (page_replica) {
         /* Replica exists - handle different fault scenarios */
         atomic64_inc(&page_coherence_replica_found_count);
-        pr_info("[Info]%s: Replica found: %p\n", __func__, page_replica);
+        // pr_info("[Info]%s: Replica found: %p\n", __func__, page_replica);
             
         if (!write) {
             /* READ FAULT on existing replica:
              * Simply map the existing replica without any protocol messages.
              * This handles the case where multiple processes read the same page.
              */
-             pr_info("[Info]%s: Read fault on existing replica - direct mapping\n", __func__);
+            //  pr_info("[Info]%s: Read fault on existing replica - direct mapping\n", __func__);
              put_page_replica_ref(page_replica);
              goto map_pfn;
             }
@@ -842,7 +888,7 @@ redo:
         * If already writable somewhere, this is M->M (just map it writable here too).
         * If only readable, this is S->M transition (need invalidation to others).
         */
-        pr_info("[Info]%s: Write fault on existing replica\n", __func__);
+        // pr_info("[Info]%s: Write fault on existing replica\n", __func__);
 
         /* Check if the replica page is currently mapped as writable anywhere in the system.
         * We use page_mapped() and check if any PTE/PMD has write permissions.
@@ -859,36 +905,40 @@ redo:
              */
             if (check_page_replica_dirty(page_replica)) {
                 is_currently_writable = true;
-                pr_info("[Info]%s: Replica page is dirty - M state\n", __func__);
+                // pr_info("[Info]%s: Replica page is dirty - M state\n", __func__);
             } else {
                 /* Page is clean - likely in S state, but could be M with clean data */
-                pr_info("[Info]%s: Replica page is clean - S state\n", __func__);
+                // pr_info("[Info]%s: Replica page is clean - S state\n", __func__);
                 is_currently_writable = false;
             }
         } else {
             /* Page not mapped anywhere - shouldn't happen for existing replica */
-            pr_info("[Info]%s: Replica exists but not mapped anywhere\n", __func__);
+            // pr_info("[Info]%s: Replica exists but not mapped anywhere\n", __func__);
             is_currently_writable = false;
         }
         
         if (is_currently_writable) {
             /* Replica is already in M state - just map it writable here too (M->M) */
-            pr_info("[Info]%s: Replica already writable elsewhere - M->M transition\n", __func__);
+            // pr_info("[Info]%s: Replica already writable elsewhere - M->M transition\n", __func__);
             put_page_replica_ref(page_replica);
             goto map_pfn;
         }
 
         /* Replica is in S state - need S->M transition */
-        pr_info("[Info]%s: S->M transition needed for existing replica\n", __func__);
-
+        // pr_info("[Info]%s: S->M transition needed for existing replica\n", __func__);
+        start_coherence_transaction = ktime_get();
         /* Send invalidation to other nodes for S->M transition */
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, node_count, 
                                         &payload, cxl_hdm_offset);
+        end_coherence_transaction = ktime_get();
+        coherence_transaction = ktime_sub(end_coherence_transaction, start_coherence_transaction);
+        atomic64_add(ktime_to_ns(coherence_transaction), &page_coherence_total_coherence_transaction_time_ns);
+
         if (ret == -EAGAIN) {
             /* Invalidate was NACKed - likely due to concurrent write fault elsewhere
              * Retry entire fault handling
              */
-            pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
+            // pr_info("[Info]%s: Invalidate NACKed - retrying fault handling\n", __func__);
             put_page_replica_ref(page_replica);
             __finish_local_fault_handling(fh);
             // wait for a second before redo
@@ -916,7 +966,7 @@ redo:
     /* Determine what protocol messages are needed for new replica creation */
     if (write) {
         /* I->M transition: Need both fetch and invalidate */
-        pr_info("[Info]%s: I->M transition: need fetch + invalidate\n", __func__);
+        // pr_info("[Info]%s: I->M transition: need fetch + invalidate\n", __func__);
         need_invalidate = true;
         // Set FH_STATE_WRITE flag to 0 indicate write state after I->S transition
         spin_lock_irqsave(&faults_lock[fk], flags);
@@ -925,14 +975,18 @@ redo:
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
     } else {
         /* I->S transition: Only need fetch */
-        pr_info("[Info]%s: I->S transition: need fetch only\n", __func__);
+        // pr_info("[Info]%s: I->S transition: need fetch only\n", __func__);
         need_invalidate = false;
     }
-    
+
+    start_coherence_transaction = ktime_get();
     /* Send fetch message to other nodes */
-    pr_info("[Info]%s: Broadcasting fetch message for I->S transition\n", __func__);
+    // pr_info("[Info]%s: Broadcasting fetch message for I->S transition\n", __func__);
     ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_FETCH, node_count, 
                                    &payload, cxl_hdm_offset);
+    end_coherence_transaction = ktime_get();
+    coherence_transaction = ktime_sub(end_coherence_transaction, start_coherence_transaction);
+    atomic64_add(ktime_to_ns(coherence_transaction), &page_coherence_total_coherence_transaction_time_ns);    
     if (ret == -EAGAIN) {
         /* Fetch was NACKed - likely due to concurrent write fault elsewhere
             * Retry entire fault handling
@@ -950,14 +1004,18 @@ redo:
     
     /* Send invalidate message if needed (for I->M transition) */
     if (need_invalidate) {
-        pr_info("[Info]%s: Broadcasting invalidate message for S->M transition\n", __func__);
+        // pr_info("[Info]%s: Broadcasting invalidate message for S->M transition\n", __func__);
         // Set FH_STATE_WRITE flag to 1 indicate write state after I->S transition
         spin_lock_irqsave(&faults_lock[fk], flags);
         fh->fh_flags |= FH_STATE_WRITE;
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         // pr_info("[Info]%s: Released lock for fault hash bucket %d.\n", __func__, fk);
+        start_coherence_transaction = ktime_get();
         ret = broadcast_message_and_wait(SWMC_KMSG_TYPE_INVALIDATE, node_count, 
                                        &payload, cxl_hdm_offset);
+        end_coherence_transaction = ktime_get();
+        coherence_transaction = ktime_sub(end_coherence_transaction, start_coherence_transaction);
+        atomic64_add(ktime_to_ns(coherence_transaction), &page_coherence_total_coherence_transaction_time_ns);
         if (ret == -EAGAIN) {
             /* Invalidate was NACKed - likely due to concurrent write fault elsewhere
              * Retry entire fault handling
@@ -973,9 +1031,13 @@ redo:
             return VM_FAULT_RETRY;
         }
     }
-
+    
+    start_page_replication = ktime_get();
     /* Create replica page using page_replication.c API */
     page_replica = create_page_replica(order, original_pfn, kaddr);
+    end_page_replication = ktime_get();
+    page_replication = ktime_sub(end_page_replication, start_page_replication);
+    atomic64_add(ktime_to_ns(page_replication), &page_coherence_total_page_replication_time_ns);
 
 
     if (IS_ERR(page_replica)) {
@@ -989,11 +1051,11 @@ redo:
     atomic64_inc(&page_coherence_replica_created_count);
 
     // map virtual address to page replica
-    pr_info("[Info]%s: Created new page replica: %p\n", __func__, page_replica);
+    // pr_info("[Info]%s: Created new page replica: %p\n", __func__, page_replica);
     
 map_pfn:
-    pr_info("[Info]%s: Original page: %p, page replica: %p\n", __func__, original_page, page_replica);
-
+    // pr_info("[Info]%s: Original page: %p, page replica: %p\n", __func__, original_page, page_replica);
+    start_metadata_update = ktime_get();
     if (write)
         make_page_replica_dirty(page_replica);
 
@@ -1005,8 +1067,8 @@ map_pfn:
     //     current->pid, pfn_t_to_pfn(replica_pfn), vmf->address, write);
     *pfn = replica_pfn;
 
-    pr_info("[Info]%s: Replicated pfn=0x%lx at 0x%lx\n",
-            __func__, pfn_t_to_pfn(replica_pfn), vmf->address);
+    // pr_info("[Info]%s: Replicated pfn=0x%lx at 0x%lx\n",
+    //         __func__, pfn_t_to_pfn(replica_pfn), vmf->address);
 
     /* Finish local fault handling */
     if (__finish_local_fault_handling(fh)) {
@@ -1016,9 +1078,12 @@ map_pfn:
         return VM_FAULT_RETRY;
         // goto redo;
     }
+    end_metadata_update = ktime_get();
+    metadata_update = ktime_sub(end_metadata_update, start_metadata_update);
+    atomic64_add(ktime_to_ns(metadata_update), &page_coherence_total_metadata_update_time_ns);
     end = ktime_get();
-    diff = ktime_sub(end, start);
-    atomic64_add(ktime_to_ns(diff), &page_coherence_total_handling_time_ns);
+    page_fault_latency = ktime_sub(end, start_page_fault);
+    atomic64_add(ktime_to_ns(page_fault_latency), &page_coherence_total_page_fault_time_ns);
     return 0;
 }
 

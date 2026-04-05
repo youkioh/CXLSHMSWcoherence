@@ -255,8 +255,8 @@ static inline int win_get(struct cxl_kmsg_window *win,
     if (!win_inuse(win))
         return -1;
 
-    pr_info("%s: win_get: head=%lu, tail=%lu, inuse=%lu\n", 
-            MODULE_NAME, win->head, win->tail, win_inuse(win));
+    // pr_info("%s: win_get: head=%lu, tail=%lu, inuse=%lu\n", 
+    //         MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     // /* Invalidate cache to see latest data from other CXL nodes */
     // cxl_invalidate_cache(win, sizeof(struct cxl_kmsg_window));
@@ -269,9 +269,9 @@ static inline int win_get(struct cxl_kmsg_window *win,
     /* Invalidate message buffer cache to get fresh data */
     cxl_invalidate_cache(rcvd, sizeof(struct swmc_kmsg_message));
 
-    pr_info("%s: After invalidate message: type=%d, ws_id=%d, from_nid=%d, to_nid=%d\n", 
-            MODULE_NAME, rcvd->header.type, rcvd->header.ws_id, 
-            rcvd->header.from_nid, rcvd->header.to_nid);
+    // pr_info("%s: After invalidate message: type=%d, ws_id=%d, from_nid=%d, to_nid=%d\n", 
+    //         MODULE_NAME, rcvd->header.type, rcvd->header.ws_id, 
+    //         rcvd->header.from_nid, rcvd->header.to_nid);
     
     /* Update ring buffer tail */
     insurance_recv = win->tail + 1;
@@ -281,8 +281,8 @@ static inline int win_get(struct cxl_kmsg_window *win,
     cxl_flush_cache(&win->tail, sizeof(win->tail));
     smp_mb();
 
-    pr_info("%s: After updating tail: head=%lu, tail=%lu, inuse=%lu\n", 
-            MODULE_NAME, win->head, win->tail, win_inuse(win));
+    // pr_info("%s: After updating tail: head=%lu, tail=%lu, inuse=%lu\n", 
+    //         MODULE_NAME, win->head, win->tail, win_inuse(win));
     
     *msg = rcvd;
     return 0;
@@ -430,8 +430,8 @@ int cxl_kmsg_unicast(enum swmc_kmsg_type type, int ws_id, int dest_nid, struct p
         return ret;
     }
 
-    pr_info(KERN_INFO "%s: Unicast message sent: type=%d, ws_id=%d, dest_nid=%d\n", 
-            MODULE_NAME, type, ws_id, dest_nid);
+    // pr_info(KERN_INFO "%s: Unicast message sent: type=%d, ws_id=%d, dest_nid=%d\n", 
+    //         MODULE_NAME, type, ws_id, dest_nid);
     
     kfree(message);
 
@@ -452,8 +452,8 @@ int cxl_kmsg_broadcast(enum swmc_kmsg_type type, int ws_id, struct payload_data 
         }
     }
 
-    pr_info(KERN_INFO "%s: Broadcast message sent: type=%d, ws_id=%d\n", 
-            MODULE_NAME, type, ws_id);
+    // pr_info(KERN_INFO "%s: Broadcast message sent: type=%d, ws_id=%d\n", 
+    //         MODULE_NAME, type, ws_id);
 
     return 0;
 }
@@ -524,8 +524,8 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
                 break;
             }
 
-            pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
-                MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
+            // pr_info("%s: Received message from node %d: type=%d, ws_id=%d\n", 
+            //     MODULE_NAME, from_nid, msg->header.type, msg->header.ws_id);
 
             found_message = true;
             ret = swmc_kmsg_process_message(msg);
@@ -588,7 +588,7 @@ static int __init init_cxl_shm(void)
     pr_info(KERN_INFO "%s: Ring buffer size: %d messages\n", MODULE_NAME, CXL_KMSG_RBUF_SIZE);
     pr_info(KERN_INFO "%s: Window structure size: %lu bytes (0x%lx)\n", 
             MODULE_NAME, sizeof(struct cxl_kmsg_window), sizeof(struct cxl_kmsg_window));
-    pr_info(KERN_INFO "%s: Window offset (aligned): %d bytes (0x%x)\n", 
+        pr_info(KERN_INFO "%s: Window offset (aligned): %lu bytes (0x%lx)\n", 
             MODULE_NAME, SWMC_KMSG_WINDOW_OFFSET, SWMC_KMSG_WINDOW_OFFSET);
     
     if (node_id < 0 || node_id >= MAX_NODES) {

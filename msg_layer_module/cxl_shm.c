@@ -551,21 +551,39 @@ static int recv_handler(void *arg)
 {
     struct cxl_kmsg_handle *ckh = (struct cxl_kmsg_handle *)arg;
     int ret;
+    int empty_count = 0; // 메시지가 없는 횟수를 카운트
 
     pr_info("%s: Receive handler for node %d started\n", MODULE_NAME, ckh->nid);
 
     while (!kthread_should_stop()) {
-        cxl_kmsg_receive(ckh);
-        if (ret == 0) {
-            cpu_relax();
+        ret = cxl_kmsg_receive(ckh);
+
+        if (ret > 0) {
+            empty_count = 0; // 카운트 초기화
+            
+        } else if (ret == 0) {
+            // Adaptive Polling 적용
+            empty_count++;
+            
+            if (empty_count < 1000) {
+                // 처음엔 짧게 대기 (저지연 응답을 위해)
+                cpu_relax();
+            } else {
+                // 계속 메시지가 없으면 CPU를 놓아주고 Sleep (전력/CPU 절약)
+                usleep_range(10, 50); 
+            }
             cond_resched();
-            // usleep_range(50, 100); // TODO: use if needed
-        } else if (ret < 0) {
-            pr_err("%s: Error receiving messages: %d\n", MODULE_NAME, ret);
+
+        } else { // ret < 0
+            pr_err_ratelimited("%s: Error receiving messages: %d\n", MODULE_NAME, ret);
+            
+            // 에러 발생 시에도 무한루프 폭주를 막기 위해 잠시 대기
+            usleep_range(1000, 2000); 
+            empty_count = 0;
         }
     }
     
-    pr_info(KERN_INFO "%s: Receive handler for node %d stopped\n", MODULE_NAME, ckh->nid);
+    pr_info("%s: Receive handler for node %d stopped\n", MODULE_NAME, ckh->nid);
     return 0;
 }
 

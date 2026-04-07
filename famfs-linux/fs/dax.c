@@ -1723,7 +1723,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		struct xa_state *xas, void **entry, bool pmd)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_fault_iter] dax_fault_iter is called, pmd: %d\n", pmd);
+	// pr_info("[dax_fault_iter] dax_fault_iter is called, pmd: %d\n", pmd);
 	const struct iomap *iomap = &iter->iomap;
 	const struct iomap *srcmap = iomap_iter_srcmap(iter);
 	size_t size = pmd ? PMD_SIZE : PAGE_SIZE;
@@ -1756,9 +1756,9 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 		return pmd ? VM_FAULT_FALLBACK : dax_fault_return(err);
 
 #ifdef CONFIG_PAGE_COHERENCE
-	pr_info("[Info]%s: TGID=%d, PID=%d, pfn=0x%lx, pmd=%d, write=%d\n",
-		__func__, current->tgid, current->pid,
-		pfn_t_to_pfn(pfn), pmd, write);
+	// pr_info("[Info]%s: TGID=%d, PID=%d, pfn=0x%lx, pmd=%d, write=%d\n",
+	// 	__func__, current->tgid, current->pid,
+	// 	pfn_t_to_pfn(pfn), pmd, write);
 
 	// // entry point to the page coherence management code
 	ret = page_coherence_fault(vmf, iter, size, kaddr, &pfn, pfnp);
@@ -1822,7 +1822,7 @@ static vm_fault_t dax_fault_iter(struct vm_fault *vmf,
 			// pr_info("MY_DEBUG: This is an ANONYMOUS VMA. No file associated.\n");
 		}
 		// sungsu: vmf_insert_pfn_pmd is called
-		pr_info("[dax_fault_iter] Call vmf_insert_pfn_pmd() for PMD pfn insertion.\n");
+		// pr_info("[dax_fault_iter] Call vmf_insert_pfn_pmd() for PMD pfn insertion.\n");
 		*pfnp = pfn;
 		
 		ret = vmf_insert_pfn_pmd(vmf, pfn, write);
@@ -1977,7 +1977,7 @@ static vm_fault_t dax_iomap_pmd_fault(struct vm_fault *vmf, pfn_t *pfnp,
 			       const struct iomap_ops *ops)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_iomap_pmd_fault] dax_iomap_pmd_fault called.\n");
+	// pr_info("[dax_iomap_pmd_fault] dax_iomap_pmd_fault called.\n");
 	struct address_space *mapping = vmf->vma->vm_file->f_mapping;
 	XA_STATE_ORDER(xas, &mapping->i_pages, vmf->pgoff, PMD_ORDER);
 	struct iomap_iter iter = {
@@ -2081,7 +2081,7 @@ vm_fault_t dax_iomap_fault(struct vm_fault *vmf, unsigned int order,
 		    pfn_t *pfnp, int *iomap_errp, const struct iomap_ops *ops)
 {
 	// Sungsu: print when function is called
-	pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u\n", order);
+	// pr_info("[dax_iomap_fault] dax_iomap_fault called with order: %u\n", order);
 	if (order == 0) {
 		return dax_iomap_pte_fault(vmf, pfnp, iomap_errp, ops);
 	}
@@ -2141,104 +2141,4 @@ dax_insert_pfn_mkwrite(struct vm_fault *vmf, pfn_t pfn, unsigned int order)
  * dax_finish_sync_fault - finish synchronous page fault
  * @vmf: The description of the fault
  * @order: Order of entry to be inserted
- * @pfn: PFN to insert
  *
- * This function ensures that the file range touched by the page fault is
- * stored persistently on the media and handles inserting of appropriate page
- * table entry.
- */
-vm_fault_t dax_finish_sync_fault(struct vm_fault *vmf, unsigned int order,
-		pfn_t pfn)
-{
-	int err;
-	loff_t start = ((loff_t)vmf->pgoff) << PAGE_SHIFT;
-	size_t len = PAGE_SIZE << order;
-
-	err = vfs_fsync_range(vmf->vma->vm_file, start, start + len - 1, 1);
-	if (err)
-		return VM_FAULT_SIGBUS;
-	return dax_insert_pfn_mkwrite(vmf, pfn, order);
-}
-EXPORT_SYMBOL_GPL(dax_finish_sync_fault);
-
-static loff_t dax_range_compare_iter(struct iomap_iter *it_src,
-		struct iomap_iter *it_dest, u64 len, bool *same)
-{
-	const struct iomap *smap = &it_src->iomap;
-	const struct iomap *dmap = &it_dest->iomap;
-	loff_t pos1 = it_src->pos, pos2 = it_dest->pos;
-	void *saddr, *daddr;
-	int id, ret;
-
-	len = min(len, min(smap->length, dmap->length));
-
-	if (smap->type == IOMAP_HOLE && dmap->type == IOMAP_HOLE) {
-		*same = true;
-		return len;
-	}
-
-	if (smap->type == IOMAP_HOLE || dmap->type == IOMAP_HOLE) {
-		*same = false;
-		return 0;
-	}
-
-	id = dax_read_lock();
-	ret = dax_iomap_direct_access(smap, pos1, ALIGN(pos1 + len, PAGE_SIZE),
-				      &saddr, NULL);
-	if (ret < 0)
-		goto out_unlock;
-
-	ret = dax_iomap_direct_access(dmap, pos2, ALIGN(pos2 + len, PAGE_SIZE),
-				      &daddr, NULL);
-	if (ret < 0)
-		goto out_unlock;
-
-	*same = !memcmp(saddr, daddr, len);
-	if (!*same)
-		len = 0;
-	dax_read_unlock(id);
-	return len;
-
-out_unlock:
-	dax_read_unlock(id);
-	return -EIO;
-}
-
-int dax_dedupe_file_range_compare(struct inode *src, loff_t srcoff,
-		struct inode *dst, loff_t dstoff, loff_t len, bool *same,
-		const struct iomap_ops *ops)
-{
-	struct iomap_iter src_iter = {
-		.inode		= src,
-		.pos		= srcoff,
-		.len		= len,
-		.flags		= IOMAP_DAX,
-	};
-	struct iomap_iter dst_iter = {
-		.inode		= dst,
-		.pos		= dstoff,
-		.len		= len,
-		.flags		= IOMAP_DAX,
-	};
-	int ret, compared = 0;
-
-	while ((ret = iomap_iter(&src_iter, ops)) > 0 &&
-	       (ret = iomap_iter(&dst_iter, ops)) > 0) {
-		compared = dax_range_compare_iter(&src_iter, &dst_iter,
-				min(src_iter.len, dst_iter.len), same);
-		if (compared < 0)
-			return ret;
-		src_iter.processed = dst_iter.processed = compared;
-	}
-	return ret;
-}
-
-int dax_remap_file_range_prep(struct file *file_in, loff_t pos_in,
-			      struct file *file_out, loff_t pos_out,
-			      loff_t *len, unsigned int remap_flags,
-			      const struct iomap_ops *ops)
-{
-	return __generic_remap_file_range_prep(file_in, pos_in, file_out,
-					       pos_out, len, remap_flags, ops);
-}
-EXPORT_SYMBOL_GPL(dax_remap_file_range_prep);

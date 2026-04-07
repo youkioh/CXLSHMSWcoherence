@@ -246,8 +246,8 @@ static void put_page_replica_meta(struct page_replica_meta *meta)
     // pr_info("[%s] put_page_replica_meta: page=%p, order=%u, refcount=%d\n",
     //         __func__, meta->page, meta->order, refcount_read(&meta->refcount));
     if (refcount_dec_and_test(&meta->refcount)){
-        pr_info("[%s] Freeing page replica meta: page=%p, order=%u, refcount=%d\n",
-                __func__, meta->page, meta->order, refcount_read(&meta->refcount));
+        // pr_info("[%s] Freeing page replica meta: page=%p, order=%u, refcount=%d\n",
+        //         __func__, meta->page, meta->order, refcount_read(&meta->refcount));
         kfree(meta);
     }
 }
@@ -596,8 +596,8 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
         
         if (ret == REPLICA_SUCCESS) {
             freed++;
-            pr_debug("[%s] Successfully reclaimed page %p (pfn=0x%lx)\n", 
-                    __func__, m->page, page_to_pfn(m->page));
+            // pr_debug("[%s] Successfully reclaimed page %p (pfn=0x%lx)\n", 
+            //         __func__, m->page, page_to_pfn(m->page));
         } else {
             pr_err("[%s] Failed to flush page replica %p: %d\n", 
                     __func__, m->page, ret);
@@ -907,7 +907,7 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
         return REPLICA_ERROR_INVAL;
     }
 
-    pr_info("[%s] Unmapping page replica %p (order=%u)\n", __func__, page_replica, order);
+    // pr_info("[%s] Unmapping page replica %p (order=%u)\n", __func__, page_replica, order);
 
     struct address_space *mapping = page_replica->mapping;
     // TODO: Check if this works well.
@@ -947,7 +947,7 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
     dax_unlock_folio(folio_replica, cookie);
 
     // Remove the mapping entry from the XArray
-    pr_info("[%s] Removing mapping entry for page %p (index=%lu)\n", __func__, page_replica, index);
+    // pr_info("[%s] Removing mapping entry for page %p (index=%lu)\n", __func__, page_replica, index);
 
     // return 1 if sucessed
     ret = dax_delete_mapping_entry(mapping, index);
@@ -1017,12 +1017,15 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
     int err;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
 
+    // pr_info("[%s] Creating page replica for original PFN 0x%lx (order=%u)\n", 
+    //         __func__, pfn_key, order);
     // Check for duplicate replica, existance of replica should be checked before call create_page_replica
     if (xa_load(&original_to_replica_xa, pfn_key)) {
         pr_err("[Err]%s: Replica already exists for pfn %lu\n", __func__, pfn_key);
         return print_replica_error(REPLICA_ERROR_EXIST);
     }
 
+    // pr_info("[%s] Step 1: Allocating page replica with retry and manual shrinking\n", __func__);
     /* Step 1: Allocate page replica with retry and manual shrinking */
     page_replica = allocate_page_replica_with_retry(order);
     if (!page_replica) {
@@ -1030,6 +1033,7 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         return ERR_PTR(REPLICA_ERROR_NOMEM);
     }
 
+    // pr_info("[%s] Step 2: Copying data from source to replica\n", __func__);
     /* Step 2: Copy data from source to replica using unified helper */
     void *dst_kaddr = kmap_page_safe(page_replica, order);
     if (!dst_kaddr) {
@@ -1048,6 +1052,7 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
 
     // TODO: Step 3 and 4 should be done in atomic context. but later wee need to change lru later in LRU management.
     // for now, we just want to see for basic functionality.
+    // pr_info("[%s] Step 3: Adding page replica to LRU management\n", __func__);
     /* Step 3: Add to LRU management */
     err = insert_replica_lru(page_replica, order);
     if (err) {
@@ -1055,6 +1060,7 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         goto free_pages;
     }
 
+    // pr_info("[%s] Step 4: Establishing bidirectional mapping\n", __func__);
     /* Step 4: Establish bidirectional mapping */
     err = establish_bidir_mapping(page_replica, pfn_key);
     if (err) {
@@ -1062,8 +1068,8 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         goto remove_from_lru;
     }
 
-    pr_info("[%s] Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
-            __func__, order, page_to_pfn(page_replica), pfn_key);
+    // pr_info("[%s] Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
+    //         __func__, order, page_to_pfn(page_replica), pfn_key);
 
     return page_replica;
 
@@ -1123,8 +1129,8 @@ int destroy_page_replica(struct page *page_replica)
     /* Step 4: Free pages */
     __free_pages(page_replica, order);
     track_page_free(order);
-    pr_info("[%s] Successfully destroyed page replica %p (order=%u)\n",
-            __func__, page_replica, order);
+    // pr_info("[%s] Successfully destroyed page replica %p (order=%u)\n",
+    //         __func__, page_replica, order);
 
     return REPLICA_SUCCESS;
 } 
@@ -1240,8 +1246,8 @@ skip_rw_clean:
     kunmap_page_safe(page_replica, src_kaddr, order);
     kunmap_page_safe(pfn_to_page(pfn_key), dst_kaddr, order);
     
-    pr_info("[%s] Successfully wrote back replica page %p to original pfn %lu\n",
-            __func__, page_replica, pfn_key);
+    // pr_info("[%s] Successfully wrote back replica page %p to original pfn %lu\n",
+    //         __func__, page_replica, pfn_key);
 
     /* Step 7?: Clean dirty mark in DAX entry? Do we need this? -> move to the first of this function */
     return REPLICA_SUCCESS;
@@ -1310,8 +1316,8 @@ struct page *get_page_replica_with_ref(pfn_t original_pfn, unsigned int order)
                    __func__, page_replica, order, meta->order);
             return NULL; // Order mismatch, return NULL
         }
-        pr_info("[%s] Found page replica %p for original pfn %lu (with reference)\n", 
-                __func__, page_replica, pfn_key);
+        // pr_info("[%s] Found page replica %p for original pfn %lu (with reference)\n", 
+        //         __func__, page_replica, pfn_key);
         return page_replica;
     } else {
         /* Failed: page was freed or being freed */
@@ -1375,7 +1381,7 @@ EXPORT_SYMBOL(make_page_replica_dirty);
 int __flush_page_replica(struct page *page_replica)
 {
     int ret;
-    pr_info("[%s] Flushing page replica %p\n", __func__, page_replica);
+    // pr_info("[%s] Flushing page replica %p\n", __func__, page_replica);
 
     if (!page_replica) {
         pr_err("[%s] Invalid page replica pointer\n", __func__);
@@ -1394,7 +1400,7 @@ int __flush_page_replica(struct page *page_replica)
         return ret;
     }
 
-    pr_info("[%s] Successfully flushed page replica %p\n", __func__, page_replica);
+    // pr_info("[%s] Successfully flushed page replica %p\n", __func__, page_replica);
     return REPLICA_SUCCESS;
 }
 

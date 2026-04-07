@@ -930,7 +930,7 @@ redo:
             /* Invalidate was NACKed - likely due to concurrent write fault elsewhere
              * Retry entire fault handling
              */
-            pr_info("[Info]%s: Invalidate NACKed - retrying fault handling, original PFN: %lx\n", __func__, fh->original_pfn_val);
+            pr_info("[Info]%s: Invalidate NACKed - retrying fault handling, original PFN: 0x%lx\n", __func__, fh->original_pfn_val);
             put_page_replica_ref(page_replica);
             __finish_local_fault_handling(fh);
             // wait for a second before redo
@@ -939,7 +939,7 @@ redo:
             // goto redo;
         } else if (ret) {
             put_page_replica_ref(page_replica);
-            pr_err("[Err]%s: Failed to invalidate page replica, VM_FAULT_RETRY, original PFN: %lx, error: %d\n", __func__, fh->original_pfn_val, ret);
+            pr_err("[Err]%s: Failed to invalidate page replica, VM_FAULT_RETRY, original PFN: 0x%lx, error: %d\n", __func__, fh->original_pfn_val, ret);
             __finish_local_fault_handling(fh);
             return VM_FAULT_RETRY;
         }
@@ -983,14 +983,14 @@ redo:
         /* Fetch was NACKed - likely due to concurrent write fault elsewhere
             * Retry entire fault handling
             */
-        pr_info("[Info]%s: Fetch NACKed - retrying fault handling, original PFN: %lx\n", __func__, fh->original_pfn_val);
+        pr_info("[Info]%s: Fetch NACKed - retrying fault handling, original PFN: 0x%lx\n", __func__, fh->original_pfn_val);
         __finish_local_fault_handling(fh);
         msleep(1);
         return VM_FAULT_RETRY;
         // goto redo;
     } else if (ret) {
         __finish_local_fault_handling(fh);
-        pr_err("[Err]%s: Failed to fetch page replica, VM_FAULT_RETRY, original PFN: %lx, error: %d\n", __func__, fh->original_pfn_val, ret);
+        pr_err("[Err]%s: Failed to fetch page replica, VM_FAULT_RETRY, original PFN: 0x%lx, error: %d\n", __func__, fh->original_pfn_val, ret);
         return VM_FAULT_RETRY;
     }
     
@@ -1012,14 +1012,14 @@ redo:
             /* Invalidate was NACKed - likely due to concurrent write fault elsewhere
              * Retry entire fault handling
              */
-            pr_info("[Info]%s: Invalidate NACKed - retrying fault handling, original PFN: %lx\n", __func__, fh->original_pfn_val);
+            pr_info("[Info]%s: Invalidate NACKed - retrying fault handling, original PFN: 0x%lx\n", __func__, fh->original_pfn_val);
             __finish_local_fault_handling(fh);
             msleep(1);
             return VM_FAULT_RETRY;
             // goto redo;
         } else if (ret) {
             __finish_local_fault_handling(fh);
-            pr_err("[Err]%s: Failed to invalidate page replica, VM_FAULT_RETRY, original PFN: %lx, error: %d\n", __func__, fh->original_pfn_val, ret);
+            pr_err("[Err]%s: Failed to invalidate page replica, VM_FAULT_RETRY, original PFN: 0x%lx, error: %d\n", __func__, fh->original_pfn_val, ret);
             return VM_FAULT_RETRY;
         }
     }

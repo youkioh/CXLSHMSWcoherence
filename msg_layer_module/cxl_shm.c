@@ -495,6 +495,7 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
     struct swmc_kmsg_message *msg;
     int from_nid, ret;
     bool found_message = false;
+    ret = 0;
 
     /* Poll all RX windows for incoming messages */
     for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
@@ -556,25 +557,29 @@ static int recv_handler(void *arg)
     pr_info("%s: Receive handler for node %d started\n", MODULE_NAME, ckh->nid);
 
     while (!kthread_should_stop()) {
+        // 1. 버그 수정: 리턴값을 반환받음
         ret = cxl_kmsg_receive(ckh);
 
         if (ret > 0) {
+            // 메시지를 정상 수신한 경우 처리 로직 (필요시)
             empty_count = 0; // 카운트 초기화
             
         } else if (ret == 0) {
-            // Adaptive Polling 적용
+            // 2. 오버헤드 개선: Adaptive Polling 적용
             empty_count++;
             
             if (empty_count < 1000) {
-                // 처음엔 짧게 대기 (저지연 응답을 위해)
+                // 처음엔 짧게 대기 (초저지연 응답을 위해)
                 cpu_relax();
             } else {
                 // 계속 메시지가 없으면 CPU를 놓아주고 Sleep (전력/CPU 절약)
                 usleep_range(10, 50); 
+                // 참고: 만약 대기 시간이 길어도 되면 schedule_timeout() 등을 고려
             }
             cond_resched();
 
         } else { // ret < 0
+            // 3. 오버헤드 개선: 에러 로그 폭주 방지
             pr_err_ratelimited("%s: Error receiving messages: %d\n", MODULE_NAME, ret);
             
             // 에러 발생 시에도 무한루프 폭주를 막기 위해 잠시 대기
@@ -583,6 +588,7 @@ static int recv_handler(void *arg)
         }
     }
     
+    // 4. 버그 수정: KERN_INFO 중복 제거
     pr_info("%s: Receive handler for node %d stopped\n", MODULE_NAME, ckh->nid);
     return 0;
 }
@@ -663,8 +669,8 @@ static int __init init_cxl_shm(void)
             goto out_unmap;
         }
 
-        cxl_kmsg_handler->win_tx[i] = shm_window;
         cxl_kmsg_window_init(shm_window);
+        cxl_kmsg_handler->win_tx[i] = shm_window;
     }
 
     /* Map RX windows: where this node receives from other nodes */
@@ -677,10 +683,8 @@ static int __init init_cxl_shm(void)
             goto out_unmap;
         }
 
-        cxl_kmsg_handler->win_rx[i] = shm_window;
-        /* Note: Don't initialize RX windows - they're initialized by the sender */
-        /* No! intialize this! */
         cxl_kmsg_window_init(shm_window);
+        cxl_kmsg_handler->win_rx[i] = shm_window;
     }
     
     /* Register messaging operations with page coherence subsystem */

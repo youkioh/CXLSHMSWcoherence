@@ -2,7 +2,7 @@
 VERSION = 6
 PATCHLEVEL = 14
 SUBLEVEL = 0
-EXTRAVERSION = -famfs-de-stijl+
+EXTRAVERSION = -famfs-de-stijl-noasync+
 NAME = Baby Opossum Posse
 
 # *DOCUMENTATION*

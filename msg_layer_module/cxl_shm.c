@@ -495,6 +495,7 @@ static int cxl_kmsg_receive(struct cxl_kmsg_handle *ckh)
     struct swmc_kmsg_message *msg;
     int from_nid, ret;
     bool found_message = false;
+    ret = 0;
 
     /* Poll all RX windows for incoming messages */
     for (from_nid = 0; from_nid < MAX_NODES; from_nid++) {
@@ -668,8 +669,8 @@ static int __init init_cxl_shm(void)
             goto out_unmap;
         }
 
-        cxl_kmsg_handler->win_tx[i] = shm_window;
         cxl_kmsg_window_init(shm_window);
+        cxl_kmsg_handler->win_tx[i] = shm_window;
     }
 
     /* Map RX windows: where this node receives from other nodes */
@@ -682,10 +683,8 @@ static int __init init_cxl_shm(void)
             goto out_unmap;
         }
 
-        cxl_kmsg_handler->win_rx[i] = shm_window;
-        /* Note: Don't initialize RX windows - they're initialized by the sender */
-        /* No! intialize this! */
         cxl_kmsg_window_init(shm_window);
+        cxl_kmsg_handler->win_rx[i] = shm_window;
     }
     
     /* Register messaging operations with page coherence subsystem */

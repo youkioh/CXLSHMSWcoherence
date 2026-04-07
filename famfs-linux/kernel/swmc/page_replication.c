@@ -448,7 +448,7 @@ static bool check_page_replica_referenced_and_clear(struct page *page_replica)
     //         __func__, page_replica, mapping, start_index, count);
 
     if (!mapping) {
-        pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
+        // pr_err("[%s] Invalid mapping for page replica %p\n", __func__, page_replica);
         return false;
     }
 
@@ -610,7 +610,7 @@ static unsigned long replica_reclaim_from_inactive(unsigned long nr)
         put_page_replica_meta(m);
     }
     
-    pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
+    // pr_info("[%s] Reclaimed %lu pages from inactive list\n", __func__, freed);
     return freed;
 }
 
@@ -647,8 +647,8 @@ static unsigned int replica_age_active_to_inactive(unsigned long nr)
     }
     spin_unlock_irqrestore(&replica_lru_lock, flags);
     
-    pr_info("[%s] Collected %lu pages from active list for aging\n", 
-            __func__, collected);
+    // pr_info("[%s] Collected %lu pages from active list for aging\n", 
+    //         __func__, collected);
     
     /* Second pass: check references and age appropriately */
     list_for_each_entry_safe(m, tmp, &process_list, lru) {
@@ -678,7 +678,7 @@ static unsigned int replica_age_active_to_inactive(unsigned long nr)
         put_page_replica_meta(m);
     }
     
-    pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
+    // pr_info("[%s] Aged %lu pages from active to inactive\n", __func__, aged);
     return aged;
 }
 
@@ -703,11 +703,11 @@ static unsigned long replica_shrink_count(struct shrinker *s,
     unsigned long flags, n;
     spin_lock_irqsave(&replica_lru_lock, flags);
     n  = __replica_list_len(&replica_inactive_lru);
-    pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
+    // pr_info("[%s] shrink_count: inactive_len=%lu\n", __func__, n);
     n += __replica_list_len(&replica_active_lru) / REPLICA_ACTIVE_TO_INACTIVE_RATIO;
     spin_unlock_irqrestore(&replica_lru_lock, flags);
 
-    pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
+    // pr_info("[%s] shrink_count: returning %lu pages\n", __func__, n);
     return n;
 }
 
@@ -723,7 +723,7 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
     unsigned int age_mult = 1;
     unsigned int free_mult = 1;
     
-    pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
+    // pr_info("[%s] nr_to_scan=%lu\n", __func__, nr_to_scan);
     
     while (freed < nr_to_scan) {
         aged = 0;
@@ -735,22 +735,22 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         spin_unlock_irqrestore(&replica_lru_lock, flags);
 
         if ( (active_len + inactive_len) < (nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) ) {
-            pr_info("[%s] Both inactive and active are not enough\n", __func__);
+            // pr_info("[%s] Both inactive and active are not enough\n", __func__);
             break;
         }
         
         if (inactive_len >= nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
             /* Step 1-1: Direct reclaim from inactive list */
             freed += replica_reclaim_from_inactive(nr_to_scan * free_mult);
-            pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
-                    __func__, inactive_len, freed);
+            // pr_info("[%s] Reclaim result: inactive_len=%lu, freed=%lu\n", 
+            //         __func__, inactive_len, freed);
             free_mult *= 2; // double the reclaim size next time
             continue;
         }
         
         /* Step 2: Not enough inactive pages, need to age active pages first */
-        pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
-                __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
+        // pr_info("[%s] Not enough inactive pages (%lu < %lu), aging active pages\n",
+        //         __func__, inactive_len, nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT);
         
         while (aged < nr_to_scan * REPLICA_INACTIVE_THRESHOLD_MULT) {
             aged += replica_age_active_to_inactive(nr_to_scan * REPLICA_AGING_MULT * age_mult);
@@ -758,12 +758,12 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
             active_len = __replica_list_len(&replica_active_lru);
             spin_unlock_irqrestore(&replica_lru_lock, flags);
             if (!active_len) {
-                pr_info("[%s] Active list is empty, cannot age more\n", __func__);
+                // pr_info("[%s] Active list is empty, cannot age more\n", __func__);
                 break;
             }
             age_mult *= 2; // double the aging size next time
-            pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
-                    __func__, aged, active_len);
+            // pr_info("[%s] Aged %u pages so far, active_len=%lu\n", 
+            //         __func__, aged, active_len);
         }
         
         /* Step 3: Try reclaim again after aging */
@@ -777,8 +777,8 @@ static unsigned long replica_shrink_scan(struct shrink_control *sc)
         }
     }
 
-    pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
-            __func__, aged, inactive_len, freed);
+    // pr_info("[%s] Final result: aged=%u, inactive_len=%lu, freed=%lu\n",
+    //         __func__, aged, inactive_len, freed);
     
     return freed;
 }
@@ -912,7 +912,7 @@ static int unmap_page_replica(struct page *page_replica, unsigned int order)
     struct address_space *mapping = page_replica->mapping;
     // TODO: Check if this works well.
     if (!mapping) {
-        pr_err("[%s] Page %p has no mapping, which is already cleaned because of process termination\n", __func__, page_replica);
+        // pr_err("[%s] Page %p has no mapping, which is already cleaned because of process termination\n", __func__, page_replica);
         return REPLICA_SUCCESS; // No mapping, nothing to unmap
     }
 
@@ -999,6 +999,8 @@ retry_alloc:
     return page_replica;
 }
 
+int print_count = 0;
+
 /**
  * create_page_replica - Create a new page replica
  * @order: order (0 for single page, PMD_ORDER for page 512 pages)
@@ -1016,16 +1018,21 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
     unsigned long pfn_key = pfn_t_to_pfn(original_pfn);
     int err;
     size_t size = PAGE_SIZE << order; // Calculate size based on order
+    print_count++;
 
-    // pr_info("[%s] Creating page replica for original PFN 0x%lx (order=%u)\n", 
-    //         __func__, pfn_key, order);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Creating page replica for original PFN 0x%lx (order=%u)\n", 
+                __func__, pfn_key, order);
+    }
     // Check for duplicate replica, existance of replica should be checked before call create_page_replica
     if (xa_load(&original_to_replica_xa, pfn_key)) {
         pr_err("[Err]%s: Replica already exists for pfn %lu\n", __func__, pfn_key);
         return print_replica_error(REPLICA_ERROR_EXIST);
     }
 
-    // pr_info("[%s] Step 1: Allocating page replica with retry and manual shrinking\n", __func__);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Step 1: Allocating page replica with retry and manual shrinking\n", __func__);
+    }
     /* Step 1: Allocate page replica with retry and manual shrinking */
     page_replica = allocate_page_replica_with_retry(order);
     if (!page_replica) {
@@ -1033,7 +1040,9 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         return ERR_PTR(REPLICA_ERROR_NOMEM);
     }
 
-    // pr_info("[%s] Step 2: Copying data from source to replica\n", __func__);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Step 2: Copying data from source to replica\n", __func__);
+    }
     /* Step 2: Copy data from source to replica using unified helper */
     void *dst_kaddr = kmap_page_safe(page_replica, order);
     if (!dst_kaddr) {
@@ -1052,7 +1061,9 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
 
     // TODO: Step 3 and 4 should be done in atomic context. but later wee need to change lru later in LRU management.
     // for now, we just want to see for basic functionality.
-    // pr_info("[%s] Step 3: Adding page replica to LRU management\n", __func__);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Step 3: Adding page replica to LRU management\n", __func__);
+    }
     /* Step 3: Add to LRU management */
     err = insert_replica_lru(page_replica, order);
     if (err) {
@@ -1060,7 +1071,9 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         goto free_pages;
     }
 
-    // pr_info("[%s] Step 4: Establishing bidirectional mapping\n", __func__);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Step 4: Establishing bidirectional mapping\n", __func__);
+    }
     /* Step 4: Establish bidirectional mapping */
     err = establish_bidir_mapping(page_replica, pfn_key);
     if (err) {
@@ -1068,8 +1081,10 @@ struct page *create_page_replica(unsigned int order, pfn_t original_pfn, void *s
         goto remove_from_lru;
     }
 
-    // pr_info("[%s] Created page replica (order=%u, pfn=0x%lx, original_pfn=0x%lx)\n",
-    //         __func__, order, page_to_pfn(page_replica), pfn_key);
+    if (print_count % 1000 == 0) {
+        pr_info("[%s] Successfully created page replica for original PFN 0x%lx (order=%u)\n", 
+                __func__, pfn_key, order);
+    }
 
     return page_replica;
 
@@ -1145,7 +1160,7 @@ int writeback_page_replica(struct page *page_replica)
 
     // pr_info("[%s] Checking page replica is dirty before writeback\n", __func__);
     if (!check_page_replica_dirty_and_clean(page_replica)) {
-        pr_info("[%s] Page replica %p is not dirty, no writeback needed\n", __func__, page_replica);
+        // pr_info("[%s] Page replica %p is not dirty, no writeback needed\n", __func__, page_replica);
         return REPLICA_SHARED_STATE; // No writeback needed
     }
 
@@ -1186,7 +1201,7 @@ int writeback_page_replica(struct page *page_replica)
     struct address_space *mapping = page_replica->mapping;
     // TODO: Check if this works well.
     if (!mapping) {
-        pr_info("[%s] Page %p has no mapping, so skip cleaning R/W bit\n", __func__, page_replica);
+        // pr_info("[%s] Page %p has no mapping, so skip cleaning R/W bit\n", __func__, page_replica);
         // for test
         goto skip_rw_clean;
     }
@@ -1365,7 +1380,7 @@ int make_page_replica_dirty(struct page *page_replica)
         return REPLICA_ERROR_INVAL;
     }
 
-    pr_info("[%s] Making page replica %p dirty\n", __func__, page_replica);
+    // pr_info("[%s] Making page replica %p dirty\n", __func__, page_replica);
 
     struct page_replica_meta *m = get_page_replica_meta(page_replica);
     if (!m) {

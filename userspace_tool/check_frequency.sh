@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 로그 파일 설정
-SUFFIX="96GB_DE_STIJL_LMDB"
+SUFFIX="72GB_DE_STIJL_LMDB"
 LOG_DIR="./measurement_logs/$SUFFIX"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/measurement_$(date +%Y%m%d_%H%M%S).log"

@@ -642,6 +642,8 @@ retry:
     }
     
     if (unlikely(!fh)) {
+        if (!found)
+            unlock_page(original_page);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         pr_err("[Err]%s: Failed to allocate fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
         return NULL;
@@ -776,6 +778,7 @@ static struct fault_handle *__start_remote_fault_handling(pfn_t original_pfn, bo
     }
     fh = __alloc_fault_handle(original_pfn_val); 
     if (!fh) {
+        unlock_page(original_page);
         spin_unlock_irqrestore(&faults_lock[fk], flags);
         pr_err("[Err]%s: Failed to allocate fault handle for pfn=0x%lx.\n", __func__, original_pfn_val);
         return NULL;
@@ -1448,6 +1451,7 @@ int page_coherence_fault(struct vm_fault *vmf, const struct iomap_iter *iter,
         is_async = true;
         // pr_info("[Info]%s: Issuing asynchronous page coherence transaction for pfn=0x%lx\n", __func__, fh->original_pfn_val);
         ret = issue_page_coherence_transaction_async(fh);
+        atomic64_inc(&page_coherence_total_async_transaction_count);
         if (ret) {
             pr_err("[Err]%s: Failed to issue async page coherence transaction\n", __func__);
             __finish_local_fault_handling(fh);

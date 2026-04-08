@@ -106,6 +106,8 @@ static atomic64_t page_coherence_total_async_transaction_wait_time_ns = ATOMIC64
 static atomic64_t page_coherence_total_coherence_transaction_time_ns = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_page_replication_time_ns = ATOMIC64_INIT(0);
 static atomic64_t page_coherence_total_metadata_update_time_ns = ATOMIC64_INIT(0);
+static atomic64_t page_coherence_total_async_transaction_count = ATOMIC64_INIT(0);
+static atomic64_t nr_in_flight_transactions = ATOMIC64_INIT(0);
 
 /* Sysfs show functions for fault statistics */
 static ssize_t fault_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
@@ -158,6 +160,16 @@ static ssize_t total_metadata_update_time_show(struct kobject *kobj, struct kobj
     return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_metadata_update_time_ns));
 }
 
+static ssize_t total_async_transaction_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%llu\n", atomic64_read(&page_coherence_total_async_transaction_count));
+}
+
+static ssize_t in_flight_transaction_count_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+    return sprintf(buf, "%lld\n", atomic64_read(&nr_in_flight_transactions));
+}
+
 /* Sysfs store function for resetting counters */
 static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute *attr,
                                   const char *buf, size_t count)
@@ -178,6 +190,7 @@ static ssize_t reset_counters_store(struct kobject *kobj, struct kobj_attribute 
         atomic64_set(&page_coherence_total_coherence_transaction_time_ns, 0);
         atomic64_set(&page_coherence_total_page_replication_time_ns, 0);
         atomic64_set(&page_coherence_total_metadata_update_time_ns, 0);
+        atomic64_set(&page_coherence_total_async_transaction_count, 0);
         pr_info("[Info]%s: All fault counters reset\n", __func__);
     }
     
@@ -195,6 +208,8 @@ static struct kobj_attribute total_async_transaction_wait_time_attr = __ATTR_RO(
 static struct kobj_attribute total_coherence_transaction_time_attr = __ATTR_RO(total_coherence_transaction_time);
 static struct kobj_attribute total_page_replication_time_attr = __ATTR_RO(total_page_replication_time);
 static struct kobj_attribute total_metadata_update_time_attr = __ATTR_RO(total_metadata_update_time);
+static struct kobj_attribute total_async_transaction_count_attr = __ATTR_RO(total_async_transaction_count);
+static struct kobj_attribute in_flight_transaction_count_attr = __ATTR_RO(in_flight_transaction_count);
 static struct kobj_attribute reset_counters_attr = __ATTR_WO(reset_counters);
 
 /* Array of attributes for the attribute group */
@@ -209,6 +224,8 @@ static struct attribute *page_coherence_attrs[] = {
     &total_coherence_transaction_time_attr.attr,
     &total_page_replication_time_attr.attr,
     &total_metadata_update_time_attr.attr,
+    &total_async_transaction_count_attr.attr,
+    &in_flight_transaction_count_attr.attr,
     &reset_counters_attr.attr,
     NULL,
 };
@@ -226,8 +243,6 @@ static struct kobject *page_coherence_kobj;
 
 #define FAULT_HASH_SIZE 31
 #define FH_ACTION_MAX_FOLLOWER 8
-
-static atomic64_t nr_in_flight_transactions = ATOMIC64_INIT(0);
 
 atomic64_t __local_acked_fault_count = ATOMIC64_INIT(0); // Local ACK count incremented when local handling gets an ACK. lower ACK count means higher priority.
 struct hlist_head faults[FAULT_HASH_SIZE];
